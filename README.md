@@ -1,77 +1,70 @@
-# MacBook Broadcom BCM1570 FaceTime HD Camera Research
+# MacBook Pro Hardware & Linux Driver Engineering Lab
 
-Technical research, architectural documentation, and Linux driver engineering for the **Broadcom BCM1570 (PCIe ID 14e4:1570)** FaceTime HD Camera found in Apple MacBook Pro / MacBook Air models (specifically tested and analyzed on `MacBookPro11,3` running Linux kernel 7.x).
-
----
-
-## 📌 Target Hardware Profile
-
-| Parameter | Specification |
-| :--- | :--- |
-| **Host System** | MacBookPro11,3 (Retina 15-inch, Mid 2014) |
-| **PCI Device** | `04:00.0 Multimedia controller [0480]` |
-| **Vendor & Device ID** | `14e4:1570` (Broadcom Inc. and subsidiaries) |
-| **Interconnect** | Direct PCI Express x1 (Not USB / Not UVC) |
-| **SoC / Controller** | Broadcom BCM1570 ISP & PCIe Bridge |
-| **Camera Sensor** | OmniVision CMOS Sensor via MIPI CSI-2 |
-| **Sensor Control** | Internal I2C / SCCB bus managed by BCM1570 firmware |
-| **PCI BAR 0** | `0xc1d00000` (64 KB) - Control & Status Registers (CSR), PLL, Clocks |
-| **PCI BAR 2** | `0xa0000000` (256 MB) - High-speed DMA streaming aperture |
-| **PCI BAR 4** | `0xc1c00000` (1 MB) - Internal SRAM for firmware loading |
+Technical research, low-level reverse engineering, hardware architecture documentation, and Linux kernel driver development for the **Apple MacBook Pro (Retina, 15-inch, Mid 2014 - `MacBookPro11,3`)**.
 
 ---
 
-## 🧠 Architectural Overview
+## 🎯 Mission & Philosophy
 
-Unlike typical PC webcams that interface via USB Video Class (UVC), the BCM1570 is a full standalone Image Signal Processor (ISP) SoC wired directly to the system's PCIe bus:
+The goal of this project is to demystify every piece of silicon, microcontroller, and firmware layer inside the laptop down to the Linux kernel drivers and user-space APIs. 
+
+By understanding the exact hardware topologies, PCIe BAR mappings, shared memory IPC ringbuffers, and bus protocols (PCIe, LPC, I2C, SPI, ACPI, USB), we can:
+1. **Master Linux driver development** through real, complex proprietary hardware.
+2. **Revitalize and maintain hardware** on modern Linux kernels (6.x & 7.x).
+3. **Build ultra-robust user-space applications** that interact directly and cleanly with system APIs, kernel interfaces, and hardware registers.
+
+---
+
+## 💻 Hardware Profile (`MacBookPro11,3`)
 
 ```
-[ OmniVision CMOS Sensor ]
-           │ (MIPI CSI-2 bus)
-           ▼
-┌─────────────────────────────────────────────────────────────┐
-│ Broadcom BCM1570 SoC (ISP)                                  │
-│                                                             │
-│  [ Embedded Microcontroller Core ]                          │
-│     └── Executes firmware loaded into SRAM (BAR 4)          │
-│     └── Manages internal RTOS & IPC message queues          │
-│                                                             │
-│  [ Hardware ISP Processing Pipeline ]                       │
-│     ├── Debayering (Raw Bayer to YUV/RGB)                   │
-│     ├── 3A Algorithms: Auto-Exposure (AE), AWB, AF          │
-│     ├── Noise reduction, Lens shading, Color matrix (CCM)   │
-│     └── Direct I2C master controlling the optical sensor    │
-│                                                             │
-│  [ DDR Memory Controller & PCIe DMA Engine ]                │
-│     └── Direct DMA frame transmission to Host RAM (BAR 2)   │
-└─────────────────────────────────────────────────────────────┘
-           │ (PCIe Bus: BAR0, BAR2, BAR4)
-           ▼
-[ Linux Host CPU: Kernel Driver (bcwc_pcie) -> /dev/video0 ]
+                        ┌──────────────────────────────────────────────┐
+                        │   Intel Core i7-4870HQ (Haswell Crystalwell) │
+                        │   - 4C / 8T @ 2.5 - 3.7 GHz                  │
+                        │   - 128 MB eDRAM Iris Pro Graphics 5200      │
+                        │   - DRAM Controller [8086:0d04]              │
+                        └───────┬──────────────────────────────┬───────┘
+                                │ PCIe Gen3 x16                │ DMI 2.0 (20 Gbps)
+                                ▼                              ▼
+                 ┌─────────────────────────────┐ ┌──────────────────────────────────────────┐
+                 │ NVIDIA GeForce GT 750M Mac  │ │ Intel 8-Series HM87 Lynx Point PCH       │
+                 │ [10de:0fe9] (2 GB GDDR5)    │ │ [8086:8c4b]                              │
+                 └──────────────┬──────────────┘ └──────┬────────────┬────────────┬─────────┘
+                                │                       │            │            │
+                                ▼                       │            │            │
+                 ┌─────────────────────────────┐        │            │            │
+                 │ Apple gmux (Lattice CPLD)   │        │            │            │
+                 │ DisplayPort / PWM Backlight │        │            │            │
+                 └──────────────┬──────────────┘        │            │            │
+                                │                       │            │            │
+                                ▼                       ▼            ▼            ▼
+                           Retina Panel          PCIe Root    PCIe Root    LPC Bus (IO)
+                          (2880 x 1800)            Port #3      Port #4    (0x300-0x31f)
+                                                        │            │            │
+                                                        ▼            ▼            ▼
+                                                 ┌────────────┐┌────────────┐┌────────────┐
+                                                 │ Broadcom   ││ Samsung    ││ Apple SMC  │
+                                                 │ BCM1570    ││ NVMe SSD   ││ (661 Keys) │
+                                                 │ FaceTime HD││ PCIe Gen3  ││ Fans / Temp│
+                                                 │ (BAR0,2,4) ││ [144d:a80c]││ Batt / ALS │
+                                                 └────────────┘└────────────┘└────────────┘
 ```
 
 ---
 
-## 📂 Repository Structure
+## 📂 Subsystems Directory
 
-* `docs/`
-  * [`HARDWARE_ARCHITECTURE.md`](docs/HARDWARE_ARCHITECTURE.md): Deep-dive into BCM1570 registers, PLL, clocks, DDR controller, and PCIe regions.
-  * [`DRIVER_INTERNALS.md`](docs/DRIVER_INTERNALS.md): Analysis of the driver source (`src/`), IPC channels, command table, and V4L2 bridge.
-  * [`FIRMWARE_AND_TOOLS.md`](docs/FIRMWARE_AND_TOOLS.md): How firmware extraction and calibration files work.
-* `src/`: Source code of the reverse-engineered Linux kernel driver (`bcwc_pcie`):
-  * `fthd_reg.h`: Hardware register definitions.
-  * `fthd_hw.c`: PLL, clocking, DDR PHY and hardware bringup.
-  * `fthd_isp.c`: Firmware loader, IPC channels and ISP commands.
-  * `fthd_drv.c`: PCI driver probe, IRQ handling and message routing.
-  * `fthd_v4l2.c`: Video4Linux2 subsystem bridge.
-* `tools/`: Diagnostic scripts, firmware extraction helpers, and testing utilities.
+| Directory | Subsystem | Controller / Hardware | Linux Driver / Subsystem |
+| :--- | :--- | :--- | :--- |
+| [`subsystems/01-camera-bcm1570/`](subsystems/01-camera-bcm1570/) | **FaceTime HD Camera** | Broadcom BCM1570 PCIe ISP (`14e4:1570`) + OmniVision CMOS | `bcwc_pcie` / `facetimehd` (`/dev/video0`) |
+| [`subsystems/02-smc-and-thermals/`](subsystems/02-smc-and-thermals/) | **System Management** | Apple SMC (Renesas H8S/custom MCU on LPC bus `0x300`) | `applesmc` (`/sys/devices/platform/applesmc.768`) |
+| [`subsystems/03-display-and-gmux/`](subsystems/03-display-and-gmux/) | **Dual GPU & Display** | Intel Iris Pro 5200 + Nvidia GT 750M + Apple gmux CPLD | `i915`, `nouveau` / `nvidia`, `apple_gmux` |
+| [`subsystems/04-input-trackpad/`](subsystems/04-input-trackpad/) | **Keyboard & Trackpad** | Broadcom BCM5974 Multitouch Controller (USB `05ac:0263`) | `bcm5974`, `hid-apple` (`evdev`) |
+| [`subsystems/05-audio-codec/`](subsystems/05-audio-codec/) | **Audio Subsystem** | Cirrus Logic CS4208 + Intel Lynx Point HD Audio (`8086:8c20`) | `snd_hda_intel`, `snd_hda_codec_cirrus` |
+| [`subsystems/06-thunderbolt-pcie/`](subsystems/06-thunderbolt-pcie/) | **Thunderbolt 2** | Intel DSL5520 Falcon Ridge 4C (`8086:156d/156c`) | `thunderbolt`, PCIe hotplug |
 
 ---
 
-## 🚀 Goals & Research Directions
+## 🛠️ Global Tools & Diagnostics
 
-1. **Hardware & Protocol Reverse Engineering:** Document all known registers, IPC channels, and undocumented firmware commands.
-2. **Modern Linux Kernel Compatibility:** Maintain and adapt the driver for kernel 6.x and 7.x (fixing video buffer freeze regressions and V4L2 API transitions).
-3. **Driver Customization:**
-   * Expose additional controls through sysfs / V4L2 controls (manual gain, exposure, raw sensor access).
-   * Tap into `TERMINAL` and `DEBUG` firmware channels to read live telemetry from the BCM1570 micro.
+* [`tools/macbook_system_audit.sh`](tools/macbook_system_audit.sh): Complete hardware topology, PCIe bus, SMC sensor and driver audit script.
