@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -O3 -mavx2 -mf16c -mfma -fopenmp -Wall -Wextra
 LDFLAGS = -lOpenCL -lm -fopenmp
 
-TARGETS = test_real_layers test_28_layers_real test_gemv_q6_k test_full_model_logits
+TARGETS = test_real_layers test_28_layers_real test_gemv_q6_k test_full_model_logits generate_stream
 
 all: $(TARGETS)
 
@@ -18,11 +18,15 @@ test_gemv_q6_k: test_gemv_q6_k.c
 test_full_model_logits: test_full_model_logits.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+generate_stream: generate_stream.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 clean:
 	rm -f $(TARGETS)
 
-run: test_full_model_logits
-	RUSTICL_ENABLE=nouveau ./test_full_model_logits
+run: generate_stream
+	RUSTICL_ENABLE=nouveau ./generate_stream
 
 .PHONY: all clean run
+
 
