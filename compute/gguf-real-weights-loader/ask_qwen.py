@@ -399,12 +399,19 @@ def main():
     req = f"QUERY {args.tokens} {','.join(map(str, q_tokens))}\n"
     s.sendall(req.encode())
 
-    # Stream output
+    # Stream output and measure timing metrics
+    t_start = time.perf_counter()
+    t_first_chunk = None
+    chunks_received = 0
+
     try:
         while True:
             chunk = s.recv(1024)
             if not chunk:
                 break
+            if t_first_chunk is None:
+                t_first_chunk = time.perf_counter()
+            chunks_received += 1
             text = chunk.decode("utf-8", errors="replace")
             if text == "ERR_CONTEXT_FULL\n":
                 print("\n❌ Error: El contexto excede el límite máximo (T_MAX=4096).", file=sys.stderr)
@@ -420,6 +427,22 @@ def main():
         print()
     finally:
         s.close()
+        t_end = time.perf_counter()
+
+    # Telemetría de tiempos
+    if t_first_chunk is not None:
+        ttft_s = t_first_chunk - t_start
+        decode_s = t_end - t_first_chunk
+        total_s = t_end - t_start
+        tok_gen = max(1, chunks_received)
+        rate = tok_gen / decode_s if decode_s > 0.05 else 0.0
+        ms_per_tok = (decode_s * 1000.0) / tok_gen if tok_gen > 0 and decode_s > 0 else 0.0
+
+        pensar_str = f"{ttft_s * 1000.0:.0f} ms" if ttft_s < 1.0 else f"{ttft_s:.2f} s"
+        resp_str = f"{decode_s * 1000.0:.0f} ms" if decode_s < 1.0 else f"{decode_s:.2f} s"
+        total_str = f"{total_s * 1000.0:.0f} ms" if total_s < 1.0 else f"{total_s:.2f} s"
+
+        print(f"\n[⏱️  Pensar (TTFT): {pensar_str} | Responder: {resp_str} ({tok_gen} tokens @ {ms_per_tok:.0f} ms/tok, {rate:.2f} tok/s) | Total: {total_str}]", file=sys.stderr)
 
     return 0
 
