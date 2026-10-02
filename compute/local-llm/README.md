@@ -60,9 +60,10 @@ We empirically patched `ggml/src/ggml-opencl/ggml-opencl.cpp` to bypass device w
    input.cl:160:16: error: unknown type name 'half4'
    ```
 3. **Engineering Root Cause:**
-   * Modern LLM inference engines rely on native 16-bit floating point arithmetic (`half` / `half4`) and subgroup operations (*warp shuffles*) to unpack quantized weights efficiently.
-   * NVIDIA Kepler GK107 (2012–2014) is a pure **FP32-only** microarchitecture at the silicon level.
-   * Consequently, the Intel Haswell CPU with **AVX2 + FMA3 (256-bit SIMD)** provides far superior performance and 100% stability.
+   * Modern LLM inference engines (like stock `llama.cpp`) rely on native 16-bit floating point arithmetic (`half` / `half4`) and subgroup operations (*warp shuffles*) to unpack quantized weights efficiently.
+   * NVIDIA Kepler GK107 (2012–2014) is a pure **FP32-only** microarchitecture at the silicon level lacking `cl_khr_fp16`.
+   * Consequently, stock `llama.cpp` defaults to the Intel Haswell CPU with **AVX2 + FMA3 (256-bit SIMD)**.
+   * **Custom Engine Breakthrough:** To overcome this limitation for standalone inference, we developed custom pure FP32-accumulated OpenCL kernels in [**`../gguf-real-weights-loader/`**](../gguf-real-weights-loader/), successfully unlocking full 28-layer GPU execution on the GT 750M at $1.1\text{ tokens/s}$ ($2.23\times$ faster decode than CPU llama.cpp).
 
 ---
 

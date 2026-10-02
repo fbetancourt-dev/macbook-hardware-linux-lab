@@ -9,12 +9,14 @@ Direct hardware execution and numerical validation of real model weights loaded 
 1. **Dynamic GGUF Indexer in C:**
    - Full header and metadata parsing directly in native C (`parse_gguf_tensors`).
    - Dynamically resolves byte offsets for all 339 tensors with robust `read_exact_at()` handling `EINTR` signal retries and EOF verification.
-2. **Full Model Residency in GT 750M VRAM:**
-   - 28 Layers $\times$ 25.10 MB = **702.80 MB** weights.
+2. **Transformer Residency & Memory Budget in GT 750M VRAM:**
+   - 28 Layers $\times$ 25.10 MB = **702.80 MB** weights (Q4_0).
+   - Output Norm (`output_norm.weight`): **6 KB** (1536 FP32 floats).
+   - Full LM Head: **182.57 MB** (151,936 rows of Q6_K).
    - 28 Layers $\times$ 8.00 MB = **224.00 MB** KV cache ($T_{\max}=4096$).
    - Dynamic workspace: strictly **0.33 MB** (reused in-place across all 28 layers).
-   - Output Norm (`output_norm.weight`): **6 KB** (1536 floats).
-   - **Total VRAM Allocated:** **927.13 MB** (< 1 GB, comfortably fitting into the 2048 MB VRAM of the GT 750M).
+   - **Total VRAM Resident:** **1110 MB** (< 55% of the 2048 MB VRAM of the GT 750M).
+   - **Host CPU Pre-Processing:** Token embeddings (`token_embd.weight`, ~445 MB) are dequantized and indexed on the CPU host, with the resulting 1536-float embedding vector transferred to the GPU per token over PCIe to conserve VRAM for the compute-intensive decoder layers.
 3. **Autoregressive Cache Continuity:**
    - Token 0 evaluated at position $\text{pos}=0$ ($T=1$).
    - Token 1 evaluated at position $\text{pos}=1$ ($T=2$), appending and reading cached KV keys and values across all 28 layers.
@@ -121,8 +123,9 @@ A high-performance persistent daemon resident in GT 750M VRAM paired with a tran
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                      qwen_server (GPU Daemon)                          │
-│   • 100% Resident in GT 750M VRAM (1110 MB / 2048 MB allocated)        │
-│   • 28 Layers (Q4_0) + Output Norm (FP32) + LM Head (Q6_K)             │
+│   • 1110 MB / 2048 MB Resident in GT 750M VRAM                         │
+│   • 28 Layers (Q4_0) + Output Norm (FP32) + LM Head (Q6_K) + KV Cache  │
+│   • Input embeddings prepared on CPU host & transferred via PCIe       │
 │   • Frozen Base KV Cache (SET_BASE prefilled once, zero repeat cost)   │
 │   • Streaming token generation directly to socket                      │
 │   • Lifecycle States: UNINITIALIZED ➔ REBUILDING ➔ READY               │
@@ -141,9 +144,9 @@ A high-performance persistent daemon resident in GT 750M VRAM paired with a tran
 - **`RAW_QUERY <max_new> <t1,t2,...>`:** Evaluates prompt from `cur_pos=0` (only permitted when no base context is active).
 
 #### Transactional Guarantees & Memory Consistency:
-1. **2-Phase Commit:**
-   - **Phase 1 (Prepare):** Tokens prefilled into GPU VRAM. If GPU rejects (e.g. `ERR_CONTEXT_FULL`), disk state is untouched.
-   - **Phase 2 (Commit):** On GPU confirmation (`OK`), facts file is written atomically (`facts.md.tmp` $\to$ `fsync()` $\to$ `os.replace` $\to$ directory `fsync()`), followed by `memory_manifest.json`.
+1. **Staged Prepare & Atomic Replacement (Crash-Consistent Transaction):**
+   - **Phase 1 (Prepare):** Prompt tokens are prefilled into GPU VRAM first. If the GPU rejects (e.g. `ERR_CONTEXT_FULL`), on-disk memory remains untouched.
+   - **Phase 2 (Commit):** On GPU confirmation (`OK`), facts file is written atomically (`facts.md.tmp` $\to$ `fsync()` $\to$ `os.replace` $\to$ directory `fsync()`), followed by atomic `memory_manifest.json` write. Recovery is guaranteed even across sudden crashes.
 2. **Deterministic Content Fingerprinting:**
    - Instead of fragile mtime checks, `memory_manifest.json` tracks `prompt_content_hash = sha256(build_base_system_prompt())`. Any modification, addition, or deletion of memory immediately triggers automatic self-healing resynchronization.
 3. **Model & Binary Fingerprinting:**
@@ -171,8 +174,12 @@ A high-performance persistent daemon resident in GT 750M VRAM paired with a tran
 ## 🛠️ Build & Run
 
 ```bash
-# Build the binaries:
+# Build all binaries (test suites + qwen_server daemon):
 make clean && make
+
+# Symlink ask-qwen CLI to ~/.local/bin:
+mkdir -p ~/.local/bin
+ln -sf $(pwd)/ask_qwen.py ~/.local/bin/ask-qwen
 
 # Launch persistent daemon in background:
 RUSTICL_ENABLE=nouveau ./qwen_server &

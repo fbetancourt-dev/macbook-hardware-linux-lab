@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -O3 -mavx2 -mf16c -mfma -fopenmp -Wall -Wextra
 LDFLAGS = -lOpenCL -lm -fopenmp
 
-TARGETS = test_real_layers test_28_layers_real test_gemv_q6_k test_full_model_logits generate_stream
+TARGETS = test_real_layers test_28_layers_real test_gemv_q6_k test_full_model_logits generate_stream qwen_server
 
 all: $(TARGETS)
 

@@ -62,7 +62,10 @@ def read_response_line(sock):
         buf.append(chunk)
         if b'\n' in chunk:
             break
-    return b''.join(buf).decode('utf-8', errors='replace').strip()
+    raw = b''.join(buf)
+    if not raw.endswith(b'\n'):
+        return ""  # Incomplete or truncated line without newline
+    return raw.decode('utf-8', errors='replace').strip()
 
 def get_status(sock):
     sock.sendall(b"STATUS\n")
@@ -127,14 +130,15 @@ def get_chat_template_hash():
     tmpl = "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
     return hashlib.sha256(tmpl.encode()).hexdigest()[:16]
 
-def write_manifest(gen: int, b_hash: str, b_pos: int, last_fact: str = ""):
-    prompt_content = build_base_system_prompt()
-    prompt_content_hash = hashlib.sha256(prompt_content.encode("utf-8")).hexdigest()[:16]
+def write_manifest(gen: int, b_hash: str, b_pos: int, prompt_hash: str = "", last_fact: str = ""):
+    if not prompt_hash:
+        prompt_content = build_base_system_prompt()
+        prompt_hash = hashlib.sha256(prompt_content.encode("utf-8")).hexdigest()[:16]
     manifest = {
         "base_generation": gen,
         "base_hash": b_hash,
         "base_pos": b_pos,
-        "prompt_content_hash": prompt_content_hash,
+        "prompt_content_hash": prompt_hash,
         "model_path": MODEL_PATH,
         "model_sha256": get_model_sha256(),
         "tokenizer_hash": get_tokenizer_hash(),
@@ -168,6 +172,7 @@ def sync_base_memory(verbose=False):
             return False
 
         sys_text = build_base_system_prompt()
+        prompt_hash = hashlib.sha256(sys_text.encode("utf-8")).hexdigest()[:16]
         tokens = tokenize(sys_text)
         if verbose:
             print(f"[*] Prefillando {len(tokens)} tokens de memoria base en GPU VRAM...", file=sys.stderr)
@@ -182,11 +187,11 @@ def sync_base_memory(verbose=False):
         m_pos = re.search(r'base_pos=(\d+)', resp)
         m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
         m_gen = re.search(r'base_generation=(\d+)', resp)
-        if "OK" in resp and m_pos and m_hash and m_gen:
+        if resp.startswith("OK ") and m_pos and m_hash and m_gen:
             b_pos = int(m_pos.group(1))
             b_hash = m_hash.group(1)
             b_gen = int(m_gen.group(1))
-            write_manifest(b_gen, b_hash, b_pos)
+            write_manifest(b_gen, b_hash, b_pos, prompt_hash=prompt_hash)
             return True
         else:
             if verbose:
@@ -224,6 +229,7 @@ def remember_fact(fact: str):
             parts.append(profile)
         parts.append(new_facts_content.strip())
         staged_sys_text = f"<|im_start|>system\n{'\n\n'.join(parts)}<|im_end|>\n"
+        prompt_hash = hashlib.sha256(staged_sys_text.encode("utf-8")).hexdigest()[:16]
 
         # 3. Tokenizar y enviar a GPU (Fase 1: Prepare & Prefill)
         tokens = tokenize(staged_sys_text)
@@ -243,7 +249,7 @@ def remember_fact(fact: str):
         m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
         m_gen = re.search(r'base_generation=(\d+)', resp)
 
-        if "OK" not in resp or not (m_pos and m_hash and m_gen):
+        if not resp.startswith("OK ") or not (m_pos and m_hash and m_gen):
             print(f"❌ Error o respuesta incompleta en prefill de GPU: {resp}. Transacción abortada (disco intacto).", file=sys.stderr)
             return False
 
@@ -268,7 +274,7 @@ def remember_fact(fact: str):
             os.close(dir_fd)
 
         # 5. Persistir Memory Manifest
-        write_manifest(b_gen, b_hash, b_pos, last_fact=fact.strip())
+        write_manifest(b_gen, b_hash, b_pos, prompt_hash=prompt_hash, last_fact=fact.strip())
 
         print(f"✅ Fase 2 (Commit): Memoria persistida atómicamente en {FACTS_FILE}")
         print(f"📄 Manifiesto actualizado: {MANIFEST_FILE} (Gen {b_gen}, Hash {b_hash})")

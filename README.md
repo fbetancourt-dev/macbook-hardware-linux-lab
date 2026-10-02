@@ -35,11 +35,11 @@ This repository transforms the 2014 MacBook Pro into a dual-purpose engineering 
 * **[`compute/opencl-basics/`](compute/opencl-basics/):** Standalone C OpenCL kernels demonstrating $17.95\times$ speedup on N-body gravitation and 412M updates/sec 2D Laplacian stencils.
 
 ### 🤖 Track 2: GPU-Accelerated Resident Transformer & Local AI ([`compute/gguf-real-weights-loader/`](compute/gguf-real-weights-loader/) & [`compute/local-llm/`](compute/local-llm/))
-* **[`compute/gguf-real-weights-loader/`](compute/gguf-real-weights-loader/):** Complete 28-layer + LM Head Transformer pipeline executing 100% resident in GT 750M VRAM (1110 MB allocated) for **Qwen2.5-Coder-1.5B**.
+* **[`compute/gguf-real-weights-loader/`](compute/gguf-real-weights-loader/):** Complete 28-layer + LM Head Transformer pipeline executing resident in GT 750M VRAM (1110 MB allocated; input embeddings prepared on CPU host) for **Qwen2.5-Coder-1.5B**.
   * **Hardware Breakthrough:** Overcomes the absence of silicon-level `cl_khr_fp16` on Kepler GK107 via custom warp-coalesced OpenCL kernels with FP32 software accumulation.
   * **Empirical Speedup:** Achieves **$961\text{ ms/tok}$** in autoregressive decode (**$2.23\times$ faster** than official `llama.cpp` on 8 Haswell CPU threads at $2143\text{ ms}$), with token-by-token output **100% bit-for-bit identical** to llama.cpp.
   * **Production Daemon (`qwen_server`):** Persistent Unix domain socket daemon with prefilled frozen base KV cache (`SET_BASE`), socket streaming, and zero repeat latency for system context.
-  * **Transactional Memory CLI (`ask-qwen`):** Pair programming CLI with 2-phase commit (`facts.md.tmp` $\to$ fsync $\to$ atomic replace), concurrency lock (`facts.lock`), and deterministic content-hash self-healing memory verification.
+  * **Transactional Memory CLI (`ask-qwen`):** Pair programming CLI with staged prepare and atomic replacement (`facts.md.tmp` $\to$ fsync $\to$ `os.replace` $\to$ dir fsync), concurrency lock (`facts.lock`), and deterministic content-hash self-healing memory verification.
 * **[`compute/local-llm/`](compute/local-llm/):** CPU-side Haswell AVX2/FMA3 pipeline for high-batch prompt prefill and background `llama-server` integration powering **Continue** in VS Code.
 
 ### 🛠️ Track 3: Proprietary Apple Hardware Reverse Engineering & Linux Drivers ([`hardware/`](hardware/))

@@ -791,12 +791,14 @@ int main(int argc, char **argv) {
             char *tok = strtok(ptr, ", \t\n");
             bool base_tok_invalid = false;
             while (tok && n_tokens < 4096) {
-                int tid = atoi(tok);
-                if (tid < 0 || tid >= VOCAB_SIZE) {
+                char *endptr = NULL;
+                errno = 0;
+                long val = strtol(tok, &endptr, 10);
+                if (errno != 0 || endptr == tok || *endptr != '\0' || val < 0 || val >= VOCAB_SIZE) {
                     base_tok_invalid = true;
                     break;
                 }
-                tokens[n_tokens++] = tid;
+                tokens[n_tokens++] = (int)val;
                 tok = strtok(NULL, ", \t\n");
             }
 
@@ -824,8 +826,8 @@ int main(int argc, char **argv) {
                 for (int l = 0; l < N_LAYERS; l++) {
                     gpu_decoder_layer_step(queue, &kernels[l], &w_dev[l], &kv_dev[l], &ws, p, p + 1);
                 }
+                clFinish(queue);
             }
-            clFinish(queue);
             base_pos = n_tokens;
             g_base_hash = hash;
             base_generation++;
@@ -871,20 +873,33 @@ int main(int argc, char **argv) {
             // format: QUERY <max_new_tokens> <id1,id2,...>
             char *token_str = strtok(line_ptr, " \t\n");
             if (token_str) {
-                max_new_tokens = atoi(token_str);
+                char *endptr = NULL;
+                errno = 0;
+                long val_max = strtol(token_str, &endptr, 10);
+                if (errno != 0 || endptr == token_str || *endptr != '\0') {
+                    tok_invalid = true;
+                } else {
+                    max_new_tokens = (int)val_max;
+                }
                 token_str = strtok(NULL, " \t\n");
                 if (token_str) {
                     char *sub = strtok(token_str, ",");
                     while (sub && tok_count < 4096) {
-                        int tid = atoi(sub);
-                        if (tid < 0 || tid >= VOCAB_SIZE) {
+                        endptr = NULL;
+                        errno = 0;
+                        long tid = strtol(sub, &endptr, 10);
+                        if (errno != 0 || endptr == sub || *endptr != '\0' || tid < 0 || tid >= VOCAB_SIZE) {
                             tok_invalid = true;
                             break;
                         }
-                        q_tokens[tok_count++] = tid;
+                        q_tokens[tok_count++] = (int)tid;
                         sub = strtok(NULL, ",");
                     }
+                } else {
+                    tok_invalid = true;
                 }
+            } else {
+                tok_invalid = true;
             }
 
             if (tok_invalid) {
@@ -947,6 +962,8 @@ int main(int argc, char **argv) {
                     clEnqueueNDRangeKernel(queue, k_lm_head, 1, NULL, &g_head, &l_head, 0, NULL, NULL);
 
                     clEnqueueReadBuffer(queue, d_logits, CL_TRUE, 0, sizeof(float) * VOCAB_SIZE, h_logits, 0, NULL, NULL);
+                } else {
+                    clFinish(queue);
                 }
             }
 
