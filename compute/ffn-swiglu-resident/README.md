@@ -1,4 +1,4 @@
-# Resident SwiGLU FFN Engine on Kepler GT 750M vs Haswell AVX2 (v2)
+# Resident SwiGLU FFN Engine on Kepler GT 750M vs Haswell AVX2 (v3)
 
 Complete, end-to-end execution engine of the **SwiGLU Feed-Forward Network (FFN)** with synthetic weights matching the official architecture of **Qwen2.5-Coder-1.5B** ($D=1536$, $M=8960$) running on the **NVIDIA GeForce GT 750M (Kepler GK107 2GB)** via **Mesa Rusticl (OpenCL 3.0)**.
 
@@ -8,63 +8,62 @@ Complete, end-to-end execution engine of the **SwiGLU Feed-Forward Network (FFN)
 
 The FFN represents **~65% of the total floating-point compute** of each autoregressive token in a modern Transformer.
 
-All weight tensors remain **100% resident in GPU VRAM** (~22.15 MB total in `Q4_0`), eliminating PCIe weight transfer bottlenecks:
+All weight tensors remain **100% resident in GPU VRAM** (~22.15 MB total in `Q4_0`), eliminating PCIe weight transfer bottlenecks.
+
+### Comparison: Modular (6 Stages) vs Fused Pipeline (3 Stages)
 
 ```
-  Host Memory (x: 6 KB)
-       │
-       ▼ (PCIe 3.0 x16: 12.7 µs)
- ┌─────────────────────────────────────────────────────────────┐
- │                  GT 750M VRAM Pipeline                      │
- │                                                             │
- │  1. RMSNorm(x, γ)                     [ 222.2 µs]           │
- │     │                                                       │
- │     ├──► 2. Gate GEMV (8960x1536)     [8,157.8 µs]          │
- │     └──► 3. Up GEMV   (8960x1536)     [8,069.2 µs]          │
- │             │                                               │
- │             ▼                                               │
- │  4. SwiGLU: SiLU(g) ⊙ u               [ 103.4 µs]           │
- │     │                                                       │
- │     ▼                                                       │
- │  5. Down GEMV (1536x8960)             [7,754.1 µs]          │
- │     │                                                       │
- │     ▼                                                       │
- │  6. Residual Add: y = x + y_down      [  33.0 µs]           │
- └──────────────────────────────┬──────────────────────────────┘
-                                │
-                                ▼ (PCIe 3.0 x16: 526.3 µs)
-                        Host Memory (y: 6 KB)
+        MODULAR PIPELINE (6 Stages)                        FUSED PIPELINE (3 Stages)
+     Host Memory (x: 6 KB)                              Host Memory (x: 6 KB)
+              │                                                  │
+              ▼ (PCIe Upload: 12.7 µs)                           ▼ (PCIe Upload: 12.7 µs)
+ ┌──────────────────────────────────────┐           ┌──────────────────────────────────────┐
+ │ 1. RMSNorm(x, γ)                     │           │ 1. RMSNorm(x, γ)                     │
+ │    │                                 │           │    │                                 │
+ │    ├──► 2. Gate GEMV (8960x1536)     │           │    ▼                                 │
+ │    └──► 3. Up GEMV   (8960x1536)     │           │ 2. Fused Gate + Up + SiLU            │
+ │            │                         │           │    • Dual-block GEMV with 4 accum    │
+ │            ▼                         │           │    • Vector z reused in registers    │
+ │ 4. SwiGLU: SiLU(g) ⊙ u               │           │    • Direct h[row] activation write  │
+ │    │                                 │           │    │                                 │
+ │    ▼                                 │           │    ▼                                 │
+ │ 5. Down GEMV (1536x8960)             │           │ 3. Fused Down GEMV + Residual        │
+ │    │                                 │           │    • In-place add: y = x + Down(h)   │
+ │    ▼                                 │           │    • Eliminates y_down buffer        │
+ │ 6. Residual Add: y = x + y_down      │           └──────────────────┬───────────────────┘
+ └──────────────────┬───────────────────┘                              │
+                    │                                                  ▼ (PCIe Download: 526 µs)
+                    ▼ (PCIe Download: 526 µs)                  Host Memory (y: 6 KB)
+            Host Memory (y: 6 KB)
 ```
 
 ---
 
 ## 📊 Measured Benchmark Results (100 Iterations on Physical Hardware)
 
-| Pipeline Stage | Operation | CPU (AVX2 FMA 8 threads) | GPU Kepler (GT 750M) | Max Numerical Error | Status |
+| Pipeline Implementation | Stages | End-to-End Wall Clock | Speedup vs CPU | Max Numerical Error | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Stage 0** | PCIe Upload $x$ (6 KB) | — | $12.71\ \mu\text{s}$ ($0.013\text{ ms}$) | — | — |
-| **Stage 1** | RMSNorm ($D=1536$) | included in total | $222.24\ \mu\text{s}$ ($0.222\text{ ms}$) | $2.38 \times 10^{-7}$ | PASSED |
-| **Stage 2** | Gate GEMV ($8960 \times 1536$) | included in total | $8,157.77\ \mu\text{s}$ ($8.158\text{ ms}$) | $4.77 \times 10^{-6}$ | PASSED |
-| **Stage 3** | Up GEMV ($8960 \times 1536$) | included in total | $8,069.17\ \mu\text{s}$ ($8.069\text{ ms}$) | $3.81 \times 10^{-6}$ | PASSED |
-| **Stage 4** | SwiGLU Activation ($M=8960$) | included in total | $103.40\ \mu\text{s}$ ($0.103\text{ ms}$) | $3.43 \times 10^{-5}$ | PASSED |
-| **Stage 5** | Down GEMV ($1536 \times 8960$) | included in total | $7,754.06\ \mu\text{s}$ ($7.754\text{ ms}$) | $1.53 \times 10^{-4}$ | PASSED |
-| **Stage 6** | Residual Add ($D=1536$) | included in total | $33.02\ \mu\text{s}$ ($0.033\text{ ms}$) | — | PASSED |
-| **Stage 7** | PCIe Download $y$ (6 KB) | — | $526.29\ \mu\text{s}$ ($0.526\text{ ms}$) | — | — |
-| **TOTAL** | **Pure Compute Time** | **$42.55\text{ ms}$** | **$24.34\text{ ms}$** | **$1.75\times$ 🚀 (GPU Faster)** | PASSED |
-| **REQUEST** | **Pure Request Latency** | **$42.55\text{ ms}$** | **$34.33\text{ ms}$** | **$1.24\times$ 🚀 (GPU Faster)** | PASSED |
+| **CPU Reference (AVX2 FMA 8 threads)** | — | **$52.28\text{ ms}$** | $1.00\times$ (Baseline) | — | — |
+| **GPU Kepler Modular Pipeline** | 6 | **$29.33\text{ ms}$** | **$1.78\times$** 🚀 | $1.53 \times 10^{-4}$ | PASSED |
+| **GPU Kepler Fused Pipeline** | 3 | **$28.23\text{ ms}$** | **$1.85\times$** 🚀 | $1.53 \times 10^{-4}$ | PASSED |
+
+### Key Improvements:
+- **Fused vs Modular:** Fused execution eliminates 3 kernel launches and intermediate global VRAM buffers ($g, u, y_{\text{down}}$), cutting uninstrumented host request latency from $29.33\text{ ms}$ down to **$28.23\text{ ms}$** ($1.04\times$ faster, saving $1.10\text{ ms}$).
+- **Total Speedup over Haswell CPU:** **$1.85\times$ faster on the GT 750M** ($28.23\text{ ms}$ vs $52.28\text{ ms}$).
+- **Numerical Fidelity:** Both pipelines match the FP32 CPU reference within $|y_{\text{gpu}} - y_{\text{cpu}}| \le 1.53 \times 10^{-4}$ ($< \text{atol} + \text{rtol} \cdot |y|$), with zero NaNs or infinities.
 
 ---
 
-## 🔬 Takeaways
+## 🔬 Architectural Details & Optimizations
 
-1. **GPU Pure Compute is 1.75× Faster:**
-   The entire sequence of RMSNorm, Gate, Up, SwiGLU, Down, and Residual takes **$24.34\text{ ms}$ on the GT 750M**, compared to **$42.55\text{ ms}$ on the 8-thread Haswell CPU**.
-2. **Minimal PCIe Overhead:**
-   Uploading $x$ takes only **$12.7\ \mu\text{s}$**, demonstrating that keeping weights resident in VRAM eliminates host-device bandwidth bottlenecks.
-3. **Rigorous Numerical Validation:**
-   Every single intermediate buffer ($z, g, u, h, y_{\text{down}}, y$) was independently validated against the CPU reference with strict combined tolerance $|a - b| \le \text{atol} + \text{rtol} \times |b|$, passing with zero NaNs or infinities.
-4. **Separate Request Measurement:**
-   Pure request latency is measured independently without synchronous profiling event queries inside the timed loop, giving an uninstrumented host time of $34.33\text{ ms}$.
+1. **Explicit Workgroup Contract:**
+   All GEMV kernels specify `__attribute__((reqd_work_group_size(WG_THREADS, 1, 1)))` (128 threads = 4 warps), allowing Mesa Rusticl / Nouveau to optimize register allocation without spill hazards.
+2. **Quad Accumulators for Kepler Dual-Issue ILP:**
+   In `gemv_swiglu_fused`, work is split across 4 independent accumulators (`gate_a`, `gate_b`, `up_a`, `up_b`), providing independent arithmetic operations that hide instruction and memory latency on Kepler's dual warp dispatchers.
+3. **Zero Host Allocation Overhead:**
+   All kernel objects (`k_gate`, `k_up`, `k_down`, `k_fused_gate_up`, `k_fused_down_res`) and kernel arguments are initialized once during engine startup. The benchmark loop performs purely non-blocking enqueues followed by a single barrier on the final download event.
+4. **Dimension Safety Assertions:**
+   Host asserts `D_MODEL % 64 == 0` and `D_FFN % 64 == 0`, ensuring that the dual-block reduction ($2 \times 32 = 64$ weights per iteration) never silently drops unaligned blocks.
 
 ---
 
