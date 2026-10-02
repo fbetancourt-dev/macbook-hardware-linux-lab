@@ -7,6 +7,7 @@
 #include <math.h>
 #include <time.h>
 #include <immintrin.h>
+#include <omp.h>
 #include <CL/cl.h>
 
 #define QK4_0 32
@@ -30,7 +31,43 @@ static inline float fp16_to_float(uint16_t h) {
     return _cvtsh_ss(h);
 }
 
-// CPU AVX2 Reference GEMV Q4_0
+// Explicit AVX2 + FMA3 Dot-Product for 1 Q4_0 block (32 weights)
+static inline float dot_block_q4_0_avx2(const block_q4_0 *blk, const float *x) {
+    float d = fp16_to_float(blk->d);
+
+    float w[32];
+    #pragma unroll 16
+    for (int j = 0; j < 16; j++) {
+        uint8_t q = blk->qs[j];
+        w[j]      = (float)((int)(q & 0x0F) - 8);
+        w[j + 16] = (float)((int)(q >>   4) - 8);
+    }
+
+    __m256 vw0 = _mm256_loadu_ps(&w[0]);
+    __m256 vw1 = _mm256_loadu_ps(&w[8]);
+    __m256 vw2 = _mm256_loadu_ps(&w[16]);
+    __m256 vw3 = _mm256_loadu_ps(&w[24]);
+
+    __m256 vx0 = _mm256_loadu_ps(&x[0]);
+    __m256 vx1 = _mm256_loadu_ps(&x[8]);
+    __m256 vx2 = _mm256_loadu_ps(&x[16]);
+    __m256 vx3 = _mm256_loadu_ps(&x[24]);
+
+    __m256 acc = _mm256_mul_ps(vw0, vx0);
+    acc = _mm256_fmadd_ps(vw1, vx1, acc);
+    acc = _mm256_fmadd_ps(vw2, vx2, acc);
+    acc = _mm256_fmadd_ps(vw3, vx3, acc);
+
+    __m128 lo = _mm256_castps256_ps128(acc);
+    __m128 hi = _mm256_extractf128_ps(acc, 1);
+    __m128 sum128 = _mm_add_ps(lo, hi);
+    sum128 = _mm_hadd_ps(sum128, sum128);
+    sum128 = _mm_hadd_ps(sum128, sum128);
+
+    return _mm_cvtss_f32(sum128) * d;
+}
+
+// CPU Reference GEMV Q4_0 with Explicit AVX2 Intrinsics and OpenMP
 void gemv_q4_0_cpu_avx2(
     const block_q4_0 *W,
     const float      *x,
@@ -46,19 +83,7 @@ void gemv_q4_0_cpu_avx2(
         float row_sum = 0.0f;
 
         for (int b = 0; b < nb; b++) {
-            const block_q4_0 *blk = &row_blocks[b];
-            float d = fp16_to_float(blk->d);
-            const float *x_blk = x + b * 32;
-
-            float blk_sum = 0.0f;
-            for (int j = 0; j < 16; j++) {
-                uint8_t q = blk->qs[j];
-                int x0 = (q & 0x0F) - 8;
-                int x1 = (q >>   4) - 8;
-
-                blk_sum += (float)x0 * x_blk[j] + (float)x1 * x_blk[j + 16];
-            }
-            row_sum += d * blk_sum;
+            row_sum += dot_block_q4_0_avx2(&row_blocks[b], x + b * 32);
         }
         y[r] = row_sum;
     }
@@ -100,6 +125,11 @@ BenchResult run_benchmark(
     printf("📊 Benchmark: %s (M=%d, K=%d)\n", label, M, K);
     printf("=======================================================\n");
 
+    if (K % QK4_0 != 0) {
+        fprintf(stderr, "Error: K (%d) must be a multiple of %d!\n", K, QK4_0);
+        exit(1);
+    }
+
     int nb = K / QK4_0;
     size_t w_bytes = (size_t)M * nb * sizeof(block_q4_0);
     size_t x_bytes = (size_t)K * sizeof(float);
@@ -108,6 +138,7 @@ BenchResult run_benchmark(
     printf("  • Matrix Weights Size (Q4_0): %.2f MB\n", (double)w_bytes / (1024.0 * 1024.0));
     printf("  • Input Vector Size (FP32):   %.2f KB\n", (double)x_bytes / 1024.0);
     printf("  • Total Elements:             %d weights\n", M * K);
+    printf("  • Active OpenMP CPU Threads:  %d threads\n", omp_get_max_threads());
 
     block_q4_0 *h_W = (block_q4_0*)malloc(w_bytes);
     float *h_x = (float*)malloc(x_bytes);
@@ -126,8 +157,8 @@ BenchResult run_benchmark(
         }
     }
 
-    // 1. CPU Benchmark
-    printf("\n[1/4] Benchmarking CPU (AVX2 Haswell i7-4870HQ)...\n");
+    // 1. CPU Benchmark (Explicit AVX2 + OpenMP)
+    printf("\n[1/4] Benchmarking CPU (Explicit AVX2 + FMA3, Haswell i7-4870HQ)...\n");
     for (int i = 0; i < 5; i++) gemv_q4_0_cpu_avx2(h_W, h_x, h_y_cpu, M, K);
     const int ITERS = 100;
     double t0 = get_time_us();
@@ -139,16 +170,19 @@ BenchResult run_benchmark(
     // 2. OpenCL Buffers
     cl_int err;
     cl_mem d_W = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, w_bytes, h_W, &err);
+    if (err != CL_SUCCESS) { fprintf(stderr, "Buffer W creation failed: %d\n", err); exit(1); }
     cl_mem d_x = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, x_bytes, h_x, &err);
+    if (err != CL_SUCCESS) { fprintf(stderr, "Buffer x creation failed: %d\n", err); exit(1); }
     cl_mem d_y_row = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, y_bytes, NULL, &err);
     cl_mem d_y_warp = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, y_bytes, NULL, &err);
 
-    // 3. Kernel 1: Naive 1-thread-per-row
+    // 3. Kernel 1: Naive (1-thread/row) with Bounds Checking
     printf("\n[2/4] Benchmarking GPU Kernel 1: Naive (1-thread/row)...\n");
     clSetKernelArg(k_row, 0, sizeof(cl_mem), &d_W);
     clSetKernelArg(k_row, 1, sizeof(cl_mem), &d_x);
     clSetKernelArg(k_row, 2, sizeof(cl_mem), &d_y_row);
-    clSetKernelArg(k_row, 3, sizeof(int), &K);
+    clSetKernelArg(k_row, 3, sizeof(int), &M);
+    clSetKernelArg(k_row, 4, sizeof(int), &K);
 
     size_t local_row = 64;
     size_t global_row = ((M + local_row - 1) / local_row) * local_row;
@@ -173,16 +207,20 @@ BenchResult run_benchmark(
     double gpu_row_avg_us = (gpu_row_ns / 1e3) / ITERS;
     clEnqueueReadBuffer(queue, d_y_row, CL_TRUE, 0, y_bytes, h_y_row, 0, NULL, NULL);
 
-    // Check error Kernel 1
+    // Check error Kernel 1 with strict NaN/inf detection
     double diff_row = 0.0;
     for (int i = 0; i < M; i++) {
+        if (isnan(h_y_row[i]) || !isfinite(h_y_row[i])) {
+            fprintf(stderr, "FATAL: GPU Naive produced NaN or Inf at index %d!\n", i);
+            exit(1);
+        }
         double d = fabs((double)h_y_cpu[i] - (double)h_y_row[i]);
         if (d > diff_row) diff_row = d;
     }
     printf("  ✓ GPU Naive Kernel Time: %8.2f µs (%.3f ms) [Max Err: %.2e]\n", 
            gpu_row_avg_us, gpu_row_avg_us / 1000.0, diff_row);
 
-    // 4. Kernel 2: Warp-Cooperative (32 threads per row)
+    // 4. Kernel 2: Warp-Cooperative (Coalesced 32 th/row, safe barrier synchronization)
     printf("\n[3/4] Benchmarking GPU Kernel 2: Warp-Cooperative (Coalesced 32 th/row)...\n");
     clSetKernelArg(k_warp, 0, sizeof(cl_mem), &d_W);
     clSetKernelArg(k_warp, 1, sizeof(cl_mem), &d_x);
@@ -190,7 +228,7 @@ BenchResult run_benchmark(
     clSetKernelArg(k_warp, 3, sizeof(int), &M);
     clSetKernelArg(k_warp, 4, sizeof(int), &K);
 
-    size_t local_warp = 128; // 4 warps per work-group
+    size_t local_warp = 128;
     size_t num_wgs = (M + 3) / 4;
     size_t global_warp = num_wgs * local_warp;
 
@@ -214,11 +252,19 @@ BenchResult run_benchmark(
     double gpu_warp_avg_us = (gpu_warp_ns / 1e3) / ITERS;
     clEnqueueReadBuffer(queue, d_y_warp, CL_TRUE, 0, y_bytes, h_y_warp, 0, NULL, NULL);
 
-    // Check error Kernel 2
+    // Check error Kernel 2 with strict NaN/inf detection
     double diff_warp = 0.0;
     for (int i = 0; i < M; i++) {
+        if (isnan(h_y_warp[i]) || !isfinite(h_y_warp[i])) {
+            fprintf(stderr, "FATAL: GPU Warp produced NaN or Inf at index %d!\n", i);
+            exit(1);
+        }
         double d = fabs((double)h_y_cpu[i] - (double)h_y_warp[i]);
         if (d > diff_warp) diff_warp = d;
+    }
+    if (diff_warp > 1e-3) {
+        fprintf(stderr, "FATAL: Numerical divergence exceeded tolerance (diff = %.4f)!\n", diff_warp);
+        exit(1);
     }
     printf("  ✓ GPU Warp Kernel Time:  %8.2f µs (%.3f ms) [Max Err: %.2e]\n", 
            gpu_warp_avg_us, gpu_warp_avg_us / 1000.0, diff_warp);
@@ -229,7 +275,7 @@ BenchResult run_benchmark(
     double gb_sec = (total_bytes / (best_gpu_us * 1e-6)) / (1024.0 * 1024.0 * 1024.0);
 
     printf("\n[4/4] Layer Summary:\n");
-    printf("  • CPU Time:       %8.2f µs\n", cpu_avg_us);
+    printf("  • CPU Time (AVX2):%8.2f µs\n", cpu_avg_us);
     printf("  • GPU Best Time:  %8.2f µs\n", best_gpu_us);
     printf("  • Speedup (Best): %8.2fx %s\n", 
            cpu_avg_us / best_gpu_us,
@@ -257,7 +303,7 @@ BenchResult run_benchmark(
 
 int main() {
     printf("===============================================================\n");
-    printf("  Kepler GT 750M vs Haswell AVX2: GEMV Q4_0 Microbenchmark\n");
+    printf("  Kepler GT 750M vs Haswell AVX2: GEMV Q4_0 Microbenchmark (v2)\n");
     printf("===============================================================\n");
 
     cl_platform_id platform;
@@ -300,9 +346,9 @@ int main() {
     BenchResult r2 = run_benchmark(ctx, queue, k_row, k_warp, 8960, 1536, "Feed-Forward Up-Projection (FFN/SwiGLU)");
 
     printf("\n========================================================================================\n");
-    printf("                                  FINAL VERDICT TABLE\n");
+    printf("                                  FINAL VERDICT TABLE (v2)\n");
     printf("========================================================================================\n");
-    printf("| Test Layer | Dimension | CPU AVX2 | GPU (Naive) | GPU (Warp Coalesced) | Best Speedup |\n");
+    printf("| Test Layer | Dimension | CPU (Explicit AVX2) | GPU (Naive) | GPU (Warp Coalesced) | Best Speedup |\n");
     printf("| :--- | :---: | :---: | :---: | :---: | :---: |\n");
     printf("| Attention | 1536x1536 | %6.2f µs | %6.2f µs | %6.2f µs | %5.2fx |\n",
            r1.cpu_time_us, r1.gpu_row_time_us, r1.gpu_warp_time_us,
