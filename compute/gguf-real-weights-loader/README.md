@@ -34,7 +34,16 @@ Direct hardware execution and numerical validation of real model weights loaded 
 | **Token 0** | $\text{pos}=0$ ($T=1$) | $1586.20\text{ ms}$ | **$881.77\text{ ms}$** | **$1.80\times$** 🚀 | $1.14 \times 10^{-3}$ | **$1.44 \times 10^{-5}$** | **$1.000000$** |
 | **Token 1** | $\text{pos}=1$ ($T=2$) | $1400.55\text{ ms}$ | **$913.64\text{ ms}$** | **$1.53\times$** 🚀 | $1.26 \times 10^{-4}$ | **$4.84 \times 10^{-6}$** | **$1.000000$** |
 
-### 2. Isolated 2-Layer Subsystem (`test_real_layers`)
+### 2. Phase B0: Isolated Q6_K GEMV Kernel (`test_gemv_q6_k`)
+
+Canonical Basis Unit Tests ($e_i$) and dense random latent projection ($M=4096, K=1536$) comparing OpenCL `gemv_q6_k` vs official GGML reference:
+
+| Test Vector | CPU Haswell (8T) | GPU GT 750M | Speedup vs CPU | Max Absolute Diff | Relative $L_2$ Error | Cosine Similarity | Status |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **All Canonical Bases $e_i$** | — | — | — | **$0.0000\text{ e+}00$** | **$0.0000\text{ e+}00$** | **$1.000000$** | **PASS (100%)** |
+| **Dense Latent ($x \sim \mathcal{N}(0, 1)$)** | $13.71\text{ ms}$ | **$4.82\text{ ms}$** | **$2.84\times$** 🚀 | $2.62 \times 10^{-6}$ | **$6.93 \times 10^{-7}$** | **$1.000000$** | **PASS** |
+
+### 3. Isolated 2-Layer Subsystem (`test_real_layers`)
 
 | Step | Sequence Position / Context | CPU Haswell (8T) | GPU GT 750M | Speedup vs CPU | Relative $L_2$ Error | Cosine Similarity |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
