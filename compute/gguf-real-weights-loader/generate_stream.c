@@ -446,11 +446,84 @@ static void gpu_decoder_layer_step(
 }
 
 int main(int argc, char **argv) {
-    (void)argc; (void)argv;
-    fprintf(stderr, "========================================================================================\n");
-    fprintf(stderr, " Phase C: Real-Time Streaming Autoregressive Generator (Qwen2.5-Coder-1.5B)            \n");
-    fprintf(stderr, " Direct Hardware Execution on GT 750M (Kepler OpenCL 3.0 via Mesa Rusticl)             \n");
-    fprintf(stderr, "========================================================================================\n");
+    int max_new_tokens = 24;
+    bool quiet = false;
+    bool no_echo_prompt = false;
+    bool test_nan = false;
+    int *prompt_tokens = NULL;
+    int n_prompt = 0;
+
+    int default_prompt[] = { 750, 912, 2877, 11, 293, 982, 262, 470, 220 };
+    int n_default = sizeof(default_prompt) / sizeof(default_prompt[0]);
+
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--max-tokens") == 0) && i + 1 < argc) {
+            max_new_tokens = atoi(argv[++i]);
+            if (max_new_tokens < 0) max_new_tokens = 0;
+        } else if (strcmp(argv[i], "--tokens") == 0 && i + 1 < argc) {
+            char *token_str = strdup(argv[++i]);
+            int count = 0;
+            char *tmp = strdup(token_str);
+            char *tok = strtok(tmp, ", \t\n");
+            while (tok) { count++; tok = strtok(NULL, ", \t\n"); }
+            free(tmp);
+            if (count > 0) {
+                prompt_tokens = (int*)malloc(sizeof(int) * count);
+                n_prompt = 0;
+                tok = strtok(token_str, ", \t\n");
+                while (tok) {
+                    prompt_tokens[n_prompt++] = atoi(tok);
+                    tok = strtok(NULL, ", \t\n");
+                }
+            }
+            free(token_str);
+        } else if (strcmp(argv[i], "--tokens-file") == 0 && i + 1 < argc) {
+            FILE *tf = fopen(argv[++i], "r");
+            if (tf) {
+                int cap = 1024;
+                prompt_tokens = (int*)malloc(sizeof(int) * cap);
+                n_prompt = 0;
+                int val;
+                while (fscanf(tf, "%d", &val) == 1 || fscanf(tf, ",%d", &val) == 1) {
+                    if (n_prompt >= cap) {
+                        cap *= 2;
+                        prompt_tokens = (int*)realloc(prompt_tokens, sizeof(int) * cap);
+                    }
+                    prompt_tokens[n_prompt++] = val;
+                }
+                fclose(tf);
+            }
+        } else if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "-q") == 0) {
+            quiet = true;
+        } else if (strcmp(argv[i], "--no-echo-prompt") == 0) {
+            no_echo_prompt = true;
+        } else if (strcmp(argv[i], "--test-nan") == 0) {
+            test_nan = true;
+        } else if (argv[i][0] != '-') {
+            max_new_tokens = atoi(argv[i]);
+            if (max_new_tokens < 0) max_new_tokens = 0;
+        }
+    }
+
+    if (!prompt_tokens || n_prompt == 0) {
+        prompt_tokens = (int*)malloc(sizeof(default_prompt));
+        memcpy(prompt_tokens, default_prompt, sizeof(default_prompt));
+        n_prompt = n_default;
+    }
+
+    if (n_prompt + max_new_tokens > T_MAX) {
+        if (!quiet) fprintf(stderr, "[Warning: Clamping max_new_tokens from %d to %d to fit T_MAX=%d]\n",
+                            max_new_tokens, T_MAX - n_prompt, T_MAX);
+        max_new_tokens = T_MAX - n_prompt;
+        if (max_new_tokens < 0) max_new_tokens = 0;
+    }
+
+    if (!quiet) {
+        fprintf(stderr, "========================================================================================\n");
+        fprintf(stderr, " Phase C: Real-Time Streaming Autoregressive Generator (Qwen2.5-Coder-1.5B)            \n");
+        fprintf(stderr, " Direct Hardware Execution on GT 750M (Kepler OpenCL 3.0 via Mesa Rusticl)             \n");
+        fprintf(stderr, "========================================================================================\n");
+    }
 
     const char *gguf_path = "/home/fbetancourt/Gemini/models/qwen2.5-coder-1.5b-instruct-q4_0.gguf";
     int fd = open(gguf_path, O_RDONLY);
@@ -460,11 +533,11 @@ int main(int argc, char **argv) {
     uint64_t data_start = 0;
     int tensor_count = parse_gguf_tensors(fd, tensors, 512, &data_start);
     if (tensor_count <= 0) { fprintf(stderr, "Failed to parse GGUF\n"); exit(1); }
-    fprintf(stderr, "GGUF Indexer: Indexed %d tensor descriptors.\n", tensor_count);
+    if (!quiet) fprintf(stderr, "GGUF Indexer: Indexed %d tensor descriptors.\n", tensor_count);
 
     int n_vocab_tokens = 0;
     char **vocab_tokens = load_tokenizer_tokens(fd, &n_vocab_tokens);
-    fprintf(stderr, "Vocabulary: Loaded %d token strings from GGUF.\n", n_vocab_tokens);
+    if (!quiet) fprintf(stderr, "Vocabulary: Loaded %d token strings from GGUF.\n", n_vocab_tokens);
 
     uint64_t off_embd = get_tensor_offset(tensors, tensor_count, "token_embd.weight");
     uint64_t off_head = get_tensor_offset(tensors, tensor_count, "output.weight");
@@ -479,7 +552,7 @@ int main(int argc, char **argv) {
 
     LayerWeightsHost w_host[N_LAYERS];
 
-    fprintf(stderr, "Reading weights for all %d layers from GGUF...\n", N_LAYERS);
+    if (!quiet) fprintf(stderr, "Reading weights for all %d layers from GGUF...\n", N_LAYERS);
     double t_load_start = get_time_us();
 
     for (int l = 0; l < N_LAYERS; l++) {
@@ -538,7 +611,7 @@ int main(int argc, char **argv) {
     read_exact_at(fd, off_head, h_head, sz_head);
 
     double t_load_end = get_time_us();
-    fprintf(stderr, "All weights read from disk in %.2f ms!\n\n", (t_load_end - t_load_start) / 1000.0);
+    if (!quiet) fprintf(stderr, "All weights read from disk in %.2f ms!\n\n", (t_load_end - t_load_start) / 1000.0);
 
     // OpenCL Setup
     cl_platform_id platform;
@@ -550,7 +623,7 @@ int main(int argc, char **argv) {
 
     char dev_name[128];
     clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(dev_name), dev_name, NULL);
-    fprintf(stderr, "Active Compute Engine: %s (OpenCL 3.0 via Rusticl)\n", dev_name);
+    if (!quiet) fprintf(stderr, "Active Compute Engine: %s (OpenCL 3.0 via Rusticl)\n", dev_name);
 
     cl_context context = clCreateContext(NULL, 1, &device, NULL, NULL, &err); CHECK_CL(err, "context");
     cl_command_queue queue = clCreateCommandQueue(context, device, CL_QUEUE_PROFILING_ENABLE, &err); CHECK_CL(err, "queue");
@@ -582,7 +655,7 @@ int main(int argc, char **argv) {
     cl_kernel k_output_norm = clCreateKernel(prog_dec, "kernel_rmsnorm", &err); CHECK_CL(err, "k_output_norm");
     cl_kernel k_lm_head     = clCreateKernel(prog_q6, "gemv_q6_k", &err); CHECK_CL(err, "k_lm_head");
 
-    fprintf(stderr, "Transferring 28 layers + Output Norm + Full LM Head to GT 750M VRAM...\n");
+    if (!quiet) fprintf(stderr, "Transferring 28 layers + Output Norm + Full LM Head to GT 750M VRAM...\n");
     double t_vram_start = get_time_us();
 
     LayerWeightsDevice w_dev[N_LAYERS];
@@ -631,7 +704,7 @@ int main(int argc, char **argv) {
     clFinish(queue);
 
     double t_vram_end = get_time_us();
-    fprintf(stderr, "Entire 1.5B Parameter Model (1110 MB) Resident in GT 750M VRAM in %.2f ms!\n\n", (t_vram_end - t_vram_start) / 1000.0);
+    if (!quiet) fprintf(stderr, "Entire 1.5B Parameter Model (1110 MB) Resident in GT 750M VRAM in %.2f ms!\n\n", (t_vram_end - t_vram_start) / 1000.0);
 
     // Free host weight buffers to reclaim RAM
     for (int l = 0; l < N_LAYERS; l++) {
@@ -645,20 +718,19 @@ int main(int argc, char **argv) {
         free(w_host[l].W_down);
     }
 
-    // Canonical Python code prompt:
-    // "def add(a, b):\n    return "
-    int prompt_tokens[] = { 750, 912, 2877, 11, 293, 982, 262, 470, 220 };
-    int n_prompt = sizeof(prompt_tokens) / sizeof(prompt_tokens[0]);
-
-    fprintf(stderr, "========================================================================================\n");
-    fprintf(stderr, " STAGE 1: MULTI-TOKEN PROMPT PREFILL (%d TOKENS)\n", n_prompt);
-    fprintf(stderr, "========================================================================================\n");
-
-    // Print Prompt to stdout
-    for (int i = 0; i < n_prompt; i++) {
-        print_token_piece(vocab_tokens[prompt_tokens[i]]);
+    if (!quiet) {
+        fprintf(stderr, "========================================================================================\n");
+        fprintf(stderr, " STAGE 1: MULTI-TOKEN PROMPT PREFILL (%d TOKENS)\n", n_prompt);
+        fprintf(stderr, "========================================================================================\n");
     }
-    fflush(stdout);
+
+    // Print Prompt to stdout if not suppressed
+    if (!no_echo_prompt) {
+        for (int i = 0; i < n_prompt; i++) {
+            print_token_piece(vocab_tokens[prompt_tokens[i]]);
+        }
+        fflush(stdout);
+    }
 
     float *h_logits = (float*)malloc(sizeof(float) * VOCAB_SIZE);
     float h_embd[D_MODEL];
@@ -704,21 +776,19 @@ int main(int argc, char **argv) {
             clFinish(queue);
         }
         double t_step_1 = get_time_us();
-        fprintf(stderr, "[Prefill %d/%d | pos=%d | tok=%-5d '%s' | lat=%.2f ms]\n",
-                p + 1, n_prompt, p, tok, vocab_tokens[tok], (t_step_1 - t_step_0) / 1000.0);
+        if (!quiet) {
+            fprintf(stderr, "[Prefill %d/%d | pos=%d | tok=%-5d '%s' | lat=%.2f ms]\n",
+                    p + 1, n_prompt, p, tok, vocab_tokens[tok], (t_step_1 - t_step_0) / 1000.0);
+        }
     }
     double t_prefill_end = get_time_us();
-    fprintf(stderr, "\nPrefill Completed in %.2f ms (TTFT: %.2f ms)\n\n",
-            (t_prefill_end - t_prefill_start) / 1000.0, (t_prefill_end - t_prefill_start) / 1000.0);
+    if (!quiet) {
+        fprintf(stderr, "\nPrefill Completed in %.2f ms (TTFT: %.2f ms)\n\n",
+                (t_prefill_end - t_prefill_start) / 1000.0, (t_prefill_end - t_prefill_start) / 1000.0);
 
-    fprintf(stderr, "========================================================================================\n");
-    fprintf(stderr, " STAGE 2: AUTOREGRESSIVE STREAMING GENERATION (GREEDY ARGMAX)\n");
-    fprintf(stderr, "========================================================================================\n");
-
-    int max_new_tokens = 24;
-    if (argc > 1) {
-        max_new_tokens = atoi(argv[1]);
-        if (max_new_tokens < 0) max_new_tokens = 0;
+        fprintf(stderr, "========================================================================================\n");
+        fprintf(stderr, " STAGE 2: AUTOREGRESSIVE STREAMING GENERATION (GREEDY ARGMAX)\n");
+        fprintf(stderr, "========================================================================================\n");
     }
 
     int next_input_pos = n_prompt;
@@ -727,7 +797,7 @@ int main(int argc, char **argv) {
     int decode_forward_count = 0;
 
     for (int gen = 0; gen < max_new_tokens; gen++) {
-        if (argc > 2 && strcmp(argv[2], "--test-nan") == 0 && gen == 0) {
+        if (test_nan && gen == 0) {
             h_logits[42] = 0.0f / 0.0f; // Test NaN injection
         }
         int best_tok = 0;
@@ -800,29 +870,35 @@ int main(int argc, char **argv) {
         double step_ms = (t_step_1 - t_step_0) / 1000.0;
         total_gen_time_ms += step_ms;
         decode_forward_count++;
-        fprintf(stderr, "[Gen %2d | pos=%2d | tok=%-5d '%-8s' | logit=%7.4f | lat=%6.2f ms]\n",
-                gen + 1, next_input_pos, best_tok, vocab_tokens[best_tok], best_val, step_ms);
+        if (!quiet) {
+            fprintf(stderr, "[Gen %2d | pos=%2d | tok=%-5d '%-8s' | logit=%7.4f | lat=%6.2f ms]\n",
+                    gen + 1, next_input_pos, best_tok, vocab_tokens[best_tok], best_val, step_ms);
+        }
         next_input_pos++;
     }
 
 
-    fprintf(stderr, "\n========================================================================================\n");
-    fprintf(stderr, " GENERATION BENCHMARK SUMMARY (GT 750M Physical Hardware):\n");
-    fprintf(stderr, "========================================================================================\n");
-    fprintf(stderr, "  Prompt Tokens Processed:      %d tokens\n", n_prompt);
-    fprintf(stderr, "  Generated Tokens:             %d tokens\n", generated_count);
-    fprintf(stderr, "  Decode Forward Passes:        %d passes\n", decode_forward_count);
-    if (decode_forward_count > 0) {
-        fprintf(stderr, "  Mean Decode Forward Latency:  %.2f ms/pass\n", total_gen_time_ms / decode_forward_count);
-        fprintf(stderr, "  Decode Forward Rate:          %.2f passes/sec (t/s)\n", (decode_forward_count * 1000.0) / total_gen_time_ms);
-    } else {
-        fprintf(stderr, "  Mean Decode Forward Latency:  N/A (no decode forward executed)\n");
-        fprintf(stderr, "  Decode Forward Rate:          N/A\n");
+    if (!quiet) {
+        fprintf(stderr, "\n========================================================================================\n");
+        fprintf(stderr, " GENERATION BENCHMARK SUMMARY (GT 750M Physical Hardware):\n");
+        fprintf(stderr, "========================================================================================\n");
+        fprintf(stderr, "  Prompt Tokens Processed:      %d tokens\n", n_prompt);
+        fprintf(stderr, "  Generated Tokens:             %d tokens\n", generated_count);
+        fprintf(stderr, "  Decode Forward Passes:        %d passes\n", decode_forward_count);
+        if (decode_forward_count > 0) {
+            fprintf(stderr, "  Mean Decode Forward Latency:  %.2f ms/pass\n", total_gen_time_ms / decode_forward_count);
+            fprintf(stderr, "  Decode Forward Rate:          %.2f passes/sec (t/s)\n", (decode_forward_count * 1000.0) / total_gen_time_ms);
+        } else {
+            fprintf(stderr, "  Mean Decode Forward Latency:  N/A (no decode forward executed)\n");
+            fprintf(stderr, "  Decode Forward Rate:          N/A\n");
+        }
+        fprintf(stderr, "========================================================================================\n\n");
     }
-    fprintf(stderr, "========================================================================================\n\n");
 
     printf("\n");
+    fflush(stdout);
 
+    free(prompt_tokens);
     close(fd);
     return 0;
 }
