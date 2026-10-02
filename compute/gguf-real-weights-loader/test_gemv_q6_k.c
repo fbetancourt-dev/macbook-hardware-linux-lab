@@ -314,11 +314,17 @@ int main(void) {
     printf("Relative L2 Error: %12.4e\n", rel_l2);
     printf("Cosine Similarity: %8.6f\n\n", cos_sim);
 
-    if (rel_l2 < 1e-5 && cos_sim > 0.999999) {
-        printf("Phase B0 PASSED: Q6_K GEMV kernel validated with 100%% precision!\n");
-    } else {
-        printf("Phase B0 FAILED: Precision threshold not met!\n");
+    bool dense_passed = (rel_l2 < 1e-5 && cos_sim > 0.999999);
+    bool all_finite = true;
+    for (int r = 0; r < test_M; r++) {
+        if (!isfinite(h_y_dense_gpu[r]) || !isfinite(h_y_dense_cpu[r])) all_finite = false;
     }
 
-    return 0;
+    if (all_basis_passed && dense_passed && all_finite) {
+        printf("Phase B0 PASSED: Q6_K GEMV kernel validated within tolerance!\n");
+        return 0;
+    } else {
+        fprintf(stderr, "Phase B0 FAILED: Precision or finitude threshold not met!\n");
+        return 1;
+    }
 }

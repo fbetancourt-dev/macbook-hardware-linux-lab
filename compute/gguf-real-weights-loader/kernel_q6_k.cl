@@ -28,14 +28,13 @@ void gemv_q6_k(
     int lane_id   = tid % WARP_SIZE;
     int row       = get_group_id(0) * WARPS_PER_WG + warp_id;
 
-    if (row >= M) return;
-
-    __global const uchar *row_ptr = W + (size_t)row * 1260;
-
     float acc = 0.0f;
 
-    // Loop over 6 superblocks (each 256 weights = 210 bytes)
-    for (int b = 0; b < BLOCKS_PER_ROW; b++) {
+    if (row < M) {
+        __global const uchar *row_ptr = W + (size_t)row * 1260;
+
+        // Loop over 6 superblocks (each 256 weights = 210 bytes)
+        for (int b = 0; b < BLOCKS_PER_ROW; b++) {
         __global const uchar *blk_ptr = row_ptr + b * 210;
 
         __global const uchar *ql = blk_ptr;
@@ -98,6 +97,7 @@ void gemv_q6_k(
         acc += w7 * x_blk2[lane_id + 64];
         acc += w8 * x_blk2[lane_id + 96];
     }
+    }
 
     // Warp Reduction using Shared Memory
     __local float sh_red[128];
@@ -116,7 +116,7 @@ void gemv_q6_k(
     if (lane_id < 1)  { sh_red[tid] += sh_red[tid + 1]; }
     barrier(CLK_LOCAL_MEM_FENCE);
 
-    if (lane_id == 0) {
+    if (lane_id == 0 && row < M) {
         y[row] = sh_red[warp_id * WARP_SIZE];
     }
 }
