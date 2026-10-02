@@ -460,7 +460,7 @@ static volatile sig_atomic_t g_is_busy = 0;
 static uint64_t g_base_hash = 0;
 static int base_pos = 0;
 static int base_generation = 0;
-static const char *memory_state = "READY";
+static const char *memory_state = "UNINITIALIZED";
 static const char *g_model_path = "/home/fbetancourt/Gemini/models/qwen2.5-coder-1.5b-instruct-q4_0.gguf";
 
 static void clean_exit_handler(int sig) {
@@ -748,7 +748,7 @@ int main(int argc, char **argv) {
 
         if (strcmp(cmd, "SET_BASE") == 0) {
             g_is_busy = 1;
-            memory_state = "UPDATING";
+            memory_state = "REBUILDING";
             char *ptr = req_buf + 8;
             int n_tokens = 0;
             int *tokens = (int*)malloc(sizeof(int) * 4096);
@@ -800,6 +800,12 @@ int main(int argc, char **argv) {
 
         if (strcmp(cmd, "QUERY") == 0 || strcmp(cmd, "RAW_QUERY") == 0) {
             bool is_raw = (strcmp(cmd, "RAW_QUERY") == 0);
+            if (!is_raw && strcmp(memory_state, "READY") != 0) {
+                const char *err_not_ready = "ERR_NOT_READY\n";
+                write(client_sock, err_not_ready, strlen(err_not_ready));
+                close(client_sock);
+                continue;
+            }
             int cur_pos = is_raw ? 0 : base_pos;
             int max_new_tokens = 32;
 

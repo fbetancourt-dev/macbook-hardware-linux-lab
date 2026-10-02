@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import json
+import hashlib
 import fcntl
 import socket
 import argparse
@@ -75,12 +76,55 @@ def build_base_system_prompt():
     combined = "\n\n".join(parts)
     return f"<|im_start|>system\n{combined}<|im_end|>\n"
 
+def get_model_sha256():
+    cache_file = os.path.join(CONFIG_DIR, "model_sha256.cache")
+    if not os.path.exists(MODEL_PATH):
+        return "not_found"
+    st = os.stat(MODEL_PATH)
+    cur_key = f"{st.st_size}_{st.st_mtime}"
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r") as f:
+                c_key, c_hash = f.read().strip().split(":", 1)
+                if c_key == cur_key:
+                    return c_hash
+        except Exception:
+            pass
+
+    # Compute and cache
+    h = hashlib.sha256()
+    with open(MODEL_PATH, "rb") as f:
+        while chunk := f.read(1048576):
+            h.update(chunk)
+    val = h.hexdigest()
+    try:
+        with open(cache_file, "w") as f:
+            f.write(f"{cur_key}:{val}\n")
+    except Exception:
+        pass
+    return val
+
+def get_tokenizer_hash():
+    if not os.path.exists(TOKENIZER_BIN):
+        return "not_found"
+    h = hashlib.sha256()
+    with open(TOKENIZER_BIN, "rb") as f:
+        h.update(f.read(65536))
+    return h.hexdigest()[:16]
+
+def get_chat_template_hash():
+    tmpl = "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    return hashlib.sha256(tmpl.encode()).hexdigest()[:16]
+
 def write_manifest(gen: int, b_hash: str, b_pos: int, last_fact: str = ""):
     manifest = {
         "base_generation": gen,
         "base_hash": b_hash,
         "base_pos": b_pos,
         "model_path": MODEL_PATH,
+        "model_sha256": get_model_sha256(),
+        "tokenizer_hash": get_tokenizer_hash(),
+        "chat_template_hash": get_chat_template_hash(),
         "t_max": 4096,
         "memory_state": "READY",
         "last_fact_added": last_fact,
@@ -235,7 +279,11 @@ def main():
             try:
                 with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
                     man = json.load(f)
-                print(f"📄 Manifiesto en Disco:\n  Gen: {man.get('base_generation')} | Hash: {man.get('base_hash')} | Tokens: {man.get('base_pos')} | Actualizado: {man.get('updated_at')}")
+                print(f"📄 Manifiesto en Disco:")
+                print(f"  Gen: {man.get('base_generation')} | Hash: {man.get('base_hash')} | Tokens: {man.get('base_pos')} | Estado: {man.get('memory_state')}")
+                print(f"  Model SHA256: {man.get('model_sha256')}")
+                print(f"  Tokenizer Hash: {man.get('tokenizer_hash')} | Template Hash: {man.get('chat_template_hash')}")
+                print(f"  Actualizado: {man.get('updated_at')}")
             except Exception:
                 pass
         return 0
@@ -257,10 +305,12 @@ def main():
     # Check if base memory is loaded
     st = get_status(s)
     s.close()
-    if "base_pos=0" in st:
-        if args.verbose:
-            print("[*] Base KV cache vacío. Inicializando memoria base...", file=sys.stderr)
-        sync_base_memory(verbose=args.verbose)
+    if "base_pos=0" in st or "memory_state=UNINITIALIZED" in st or "memory_state=REBUILDING" in st:
+        print("[!] Memoria en VRAM no inicializada (estado REBUILDING). Reconstruyendo KV cache en GPU VRAM desde disco...", file=sys.stderr)
+        ok = sync_base_memory(verbose=True)
+        if not ok:
+            print("❌ Error reconstruyendo memoria base en VRAM.", file=sys.stderr)
+            return 1
 
     # Format user prompt in ChatML
     user_chatml = f"<|im_start|>user\n{args.prompt}<|im_end|>\n<|im_start|>assistant\n"
@@ -286,6 +336,9 @@ def main():
                 break
             elif text == "ERR_BUSY\n":
                 print("\n⚠️  Servidor ocupado procesando otra consulta.", file=sys.stderr)
+                break
+            elif text == "ERR_NOT_READY\n":
+                print("\n⏳ Servidor en proceso de reconstrucción (REBUILDING). Intenta en unos segundos.", file=sys.stderr)
                 break
             sys.stdout.write(text)
             sys.stdout.flush()
