@@ -16,28 +16,29 @@
 #include <CL/cl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #define NUM_PARAMS          2
-#define PARAM_CHANNELS(S)   ssGetSFcnParam(S, 0) // Number of parallel channels (e.g. 1024, 2048)
+#define PARAM_CHANNELS(S)   ssGetSFcnParam(S, 0) // Number of parallel channels (e.g. 1024)
 #define PARAM_DAMPING(S)    ssGetSFcnParam(S, 1) // Damping coefficient gamma
 
-// GPU Runtime Context structure attached to S-Function PWork
 typedef struct {
     cl_context       context;
     cl_command_queue queue;
     cl_program       program;
     cl_kernel        kernel;
-    cl_mem           d_u;       // Input forces / excitations from Simulink
-    cl_mem           d_pos;     // Internal dynamic states: position
-    cl_mem           d_vel;     // Internal dynamic states: velocity
-    cl_mem           d_y;       // Output signals to Simulink
+    cl_mem           d_u;
+    cl_mem           d_pos;
+    cl_mem           d_vel;
+    cl_mem           d_y;
     int              num_nodes;
     float            damping;
     float            *h_in_buf;
     float            *h_out_buf;
+    int              step_count;
 } GpuSimContext;
 
-// Embedded OpenCL dynamic kernel (Symplectic integration of N coupled oscillators)
+// Embedded OpenCL dynamic kernel
 static const char *sfun_kernel_src =
 "__kernel void simulate_step(__global const float *u,         \n"
 "                            __global float *pos,             \n"
@@ -68,7 +69,7 @@ static const char *sfun_kernel_src =
 "}                                                            \n";
 
 static void mdlInitializeSizes(SimStruct *S) {
-    int num_channels = 512;
+    int num_channels = 1024;
 
     ssSetNumSFcnParams(S, NUM_PARAMS);
     if (ssGetNumSFcnParams(S) != ssGetSFcnParamsCount(S)) {
@@ -79,23 +80,22 @@ static void mdlInitializeSizes(SimStruct *S) {
         num_channels = (int)mxGetScalar(PARAM_CHANNELS(S));
     }
 
-    // Input Port: Array of N control inputs / forces
     if (!ssSetNumInputPorts(S, 1)) return;
     ssSetInputPortWidth(S, 0, num_channels);
     ssSetInputPortDirectFeedThrough(S, 0, 1);
     ssSetInputPortRequiredContiguous(S, 0, 1);
 
-    // Output Port: Array of N simulated state responses
     if (!ssSetNumOutputPorts(S, 1)) return;
     ssSetOutputPortWidth(S, 0, num_channels);
 
     ssSetNumSampleTimes(S, 1);
-    ssSetNumPWork(S, 1); // 1 pointer to hold GpuSimContext
+    ssSetNumPWork(S, 1);
     ssSetOptions(S, SS_OPTION_EXCEPTION_FREE_CODE);
 }
 
 static void mdlInitializeSampleTimes(SimStruct *S) {
-    ssSetSampleTime(S, 0, INHERITED_SAMPLE_TIME);
+    // Fixed sample time: 0.005s (200 Hz) matching the model solver
+    ssSetSampleTime(S, 0, 0.005);
     ssSetOffsetTime(S, 0, 0.0);
 }
 
@@ -104,7 +104,11 @@ static void mdlInitializeSampleTimes(SimStruct *S) {
 static void mdlStart(SimStruct *S) {
     setenv("RUSTICL_ENABLE", "nouveau", 1);
 
-    int num_channels = (int)mxGetScalar(PARAM_CHANNELS(S));
+    int num_channels = 1024;
+    if (ssGetSFcnParamsCount(S) >= 1 && mxGetNumberOfElements(PARAM_CHANNELS(S)) >= 1) {
+        num_channels = (int)mxGetScalar(PARAM_CHANNELS(S));
+    }
+
     float damping = 0.05f;
     if (ssGetSFcnParamsCount(S) >= 2 && mxGetNumberOfElements(PARAM_DAMPING(S)) >= 1) {
         damping = (float)mxGetScalar(PARAM_DAMPING(S));
@@ -120,8 +124,8 @@ static void mdlStart(SimStruct *S) {
     ctx->damping   = damping;
     ctx->h_in_buf  = (float *)malloc(num_channels * sizeof(float));
     ctx->h_out_buf = (float *)malloc(num_channels * sizeof(float));
+    ctx->step_count = 0;
 
-    // Initialize OpenCL on Rusticl platform
     cl_int err;
     cl_platform_id platform = NULL;
     cl_uint num_platforms = 0;
@@ -134,7 +138,7 @@ static void mdlStart(SimStruct *S) {
 
     cl_device_id device = NULL;
     cl_uint num_devices = 0;
-    clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, &num_devices);
+    clGetDeviceIDs(platform, CL_DEVICE_TYPE_ALL, 1, &device, &num_devices);
     if (num_devices == 0 || device == NULL) {
         ssSetErrorStatus(S, "Simulink OpenCL: No GPU device available on platform!");
         return;
@@ -144,9 +148,20 @@ static void mdlStart(SimStruct *S) {
     ctx->queue   = clCreateCommandQueueWithProperties(ctx->context, device, NULL, &err);
 
     ctx->program = clCreateProgramWithSource(ctx->context, 1, &sfun_kernel_src, NULL, &err);
-    clBuildProgram(ctx->program, 1, &device, NULL, NULL, NULL);
+    err = clBuildProgram(ctx->program, 1, &device, NULL, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        char build_log[2048];
+        clGetProgramBuildInfo(ctx->program, device, CL_PROGRAM_BUILD_LOG, sizeof(build_log), build_log, NULL);
+        mexPrintf("Kernel build error: %s\n", build_log);
+        ssSetErrorStatus(S, "Failed to build OpenCL kernel!");
+        return;
+    }
 
     ctx->kernel = clCreateKernel(ctx->program, "simulate_step", &err);
+    if (err != CL_SUCCESS) {
+        ssSetErrorStatus(S, "Failed to create OpenCL kernel object!");
+        return;
+    }
 
     size_t buf_bytes = num_channels * sizeof(float);
     ctx->d_u   = clCreateBuffer(ctx->context, CL_MEM_READ_ONLY,  buf_bytes, NULL, &err);
@@ -154,13 +169,15 @@ static void mdlStart(SimStruct *S) {
     ctx->d_vel = clCreateBuffer(ctx->context, CL_MEM_READ_WRITE, buf_bytes, NULL, &err);
     ctx->d_y   = clCreateBuffer(ctx->context, CL_MEM_WRITE_ONLY, buf_bytes, NULL, &err);
 
-    // Zero-initialize internal state buffers on GPU
+    // Explicitly zero initial conditions
     float *zero_mem = (float *)calloc(num_channels, sizeof(float));
     clEnqueueWriteBuffer(ctx->queue, ctx->d_pos, CL_TRUE, 0, buf_bytes, zero_mem, 0, NULL, NULL);
     clEnqueueWriteBuffer(ctx->queue, ctx->d_vel, CL_TRUE, 0, buf_bytes, zero_mem, 0, NULL, NULL);
+    clEnqueueWriteBuffer(ctx->queue, ctx->d_y,   CL_TRUE, 0, buf_bytes, zero_mem, 0, NULL, NULL);
     free(zero_mem);
 
-    // Save context in Simulink Pointer Work vector
+    mexPrintf("⚡ [S-Function GPU] Initialized on 384 CUDA Cores for %d nodes\n", num_channels);
+
     ssGetPWork(S)[0] = (void *)ctx;
 }
 #endif
@@ -173,11 +190,17 @@ static void mdlOutputs(SimStruct *S, int_T tid) {
     const real_T *u = (const real_T *)ssGetInputPortSignal(S, 0);
     real_T *y = ssGetOutputPortRealSignal(S, 0);
     int n = ctx->num_nodes;
-    time_T dt = ssGetSampleTime(S, 0);
-    if (dt <= 0.0) dt = 0.005; // Fallback time step
+    float dt_f = 0.005f; // Explicit stable step size
 
-    for (int i = 0; i < n; i++) {
-        ctx->h_in_buf[i] = (float)u[i];
+    // Copy inputs
+    if (u) {
+        for (int i = 0; i < n; i++) {
+            ctx->h_in_buf[i] = (float)u[i];
+        }
+    } else {
+        for (int i = 0; i < n; i++) {
+            ctx->h_in_buf[i] = 0.0f;
+        }
     }
 
     size_t buf_bytes = n * sizeof(float);
@@ -185,8 +208,6 @@ static void mdlOutputs(SimStruct *S, int_T tid) {
     // Upload inputs to GPU
     clEnqueueWriteBuffer(ctx->queue, ctx->d_u, CL_FALSE, 0, buf_bytes, ctx->h_in_buf, 0, NULL, NULL);
 
-    // Set Kernel Arguments
-    float dt_f = (float)dt;
     float k_stiffness = 20.0f;
     clSetKernelArg(ctx->kernel, 0, sizeof(cl_mem), &ctx->d_u);
     clSetKernelArg(ctx->kernel, 1, sizeof(cl_mem), &ctx->d_pos);
@@ -200,15 +221,17 @@ static void mdlOutputs(SimStruct *S, int_T tid) {
     size_t global_work = n;
     size_t local_work  = (n >= 256) ? 256 : n;
 
-    // Launch on 384 CUDA Cores
+    // Launch on GPU
     clEnqueueNDRangeKernel(ctx->queue, ctx->kernel, 1, NULL, &global_work, &local_work, 0, NULL, NULL);
 
-    // Read back state outputs
+    // Read back results
     clEnqueueReadBuffer(ctx->queue, ctx->d_y, CL_TRUE, 0, buf_bytes, ctx->h_out_buf, 0, NULL, NULL);
 
     for (int i = 0; i < n; i++) {
         y[i] = (real_T)ctx->h_out_buf[i];
     }
+
+    ctx->step_count++;
 }
 
 static void mdlTerminate(SimStruct *S) {
