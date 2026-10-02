@@ -407,41 +407,48 @@ int main() {
     }
     clFinish(queue);
 
-    // [3] Benchmark Modular Pipeline (6 stages, Clean Host Wall-Clock)
-    printf("⏱️ [3/4] Measuring Modular Pipeline (6 stages, 100 runs)...\n");
-    double t_mod_start = get_time_us();
-    for (int i = 0; i < ITERS; i++) {
-        cl_event ev_done;
-        clEnqueueWriteBuffer(queue, d_x, CL_FALSE, 0, D_MODEL * sizeof(float), h_x, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &global_norm, &local_norm, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_gate, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_up, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_swiglu, 1, NULL, &global_swiglu, &local_swiglu, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_down, 1, NULL, &global_down, &local_warp, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_residual, 1, NULL, &global_resid, &local_resid, 0, NULL, NULL);
-        clEnqueueReadBuffer(queue, d_y_mod, CL_FALSE, 0, D_MODEL * sizeof(float), h_y_mod, 0, NULL, &ev_done);
-        clWaitForEvents(1, &ev_done);
-        clReleaseEvent(ev_done);
-    }
-    double t_mod_end = get_time_us();
-    double mod_avg_ms = (t_mod_end - t_mod_start) / (ITERS * 1000.0);
-    printf("  ✓ Modular Pipeline Wall-Clock E2E: %8.2f ms\n\n", mod_avg_ms);
+    // [3 & 4] Alternated Interleaved Benchmarking (eliminates thermal throttling & cache warmup bias)
+    printf("⏱️ [3/4] Measuring Modular (6 stages) & Fused (3 stages) Alternated (%d runs)...\n", ITERS);
+    double mod_total_us = 0.0;
+    double fus_total_us = 0.0;
 
-    // [4] Benchmark Fused Pipeline (3 stages: RMSNorm -> Fused Gate/Up/SiLU -> Fused Down/Res)
-    printf("⏱️ [4/4] Measuring Fused Pipeline (3 stages, 100 runs)...\n");
-    double t_fus_start = get_time_us();
     for (int i = 0; i < ITERS; i++) {
-        cl_event ev_done;
-        clEnqueueWriteBuffer(queue, d_x, CL_FALSE, 0, D_MODEL * sizeof(float), h_x, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &global_norm, &local_norm, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_fused_gate_up, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
-        clEnqueueNDRangeKernel(queue, k_fused_down_res, 1, NULL, &global_down, &local_warp, 0, NULL, NULL);
-        clEnqueueReadBuffer(queue, d_y_fus, CL_FALSE, 0, D_MODEL * sizeof(float), h_y_fused, 0, NULL, &ev_done);
-        clWaitForEvents(1, &ev_done);
-        clReleaseEvent(ev_done);
+        // Run Modular iteration
+        {
+            double t0 = get_time_us();
+            cl_event ev_done;
+            clEnqueueWriteBuffer(queue, d_x, CL_FALSE, 0, D_MODEL * sizeof(float), h_x, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &global_norm, &local_norm, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_gate, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_up, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_swiglu, 1, NULL, &global_swiglu, &local_swiglu, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_down, 1, NULL, &global_down, &local_warp, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_residual, 1, NULL, &global_resid, &local_resid, 0, NULL, NULL);
+            clEnqueueReadBuffer(queue, d_y_mod, CL_FALSE, 0, D_MODEL * sizeof(float), h_y_mod, 0, NULL, &ev_done);
+            clWaitForEvents(1, &ev_done);
+            clReleaseEvent(ev_done);
+            double t1 = get_time_us();
+            mod_total_us += (t1 - t0);
+        }
+
+        // Run Fused iteration
+        {
+            double t0 = get_time_us();
+            cl_event ev_done;
+            clEnqueueWriteBuffer(queue, d_x, CL_FALSE, 0, D_MODEL * sizeof(float), h_x, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &global_norm, &local_norm, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_fused_gate_up, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_fused_down_res, 1, NULL, &global_down, &local_warp, 0, NULL, NULL);
+            clEnqueueReadBuffer(queue, d_y_fus, CL_FALSE, 0, D_MODEL * sizeof(float), h_y_fused, 0, NULL, &ev_done);
+            clWaitForEvents(1, &ev_done);
+            clReleaseEvent(ev_done);
+            double t1 = get_time_us();
+            fus_total_us += (t1 - t0);
+        }
     }
-    double t_fus_end = get_time_us();
-    double fus_avg_ms = (t_fus_end - t_fus_start) / (ITERS * 1000.0);
+    double mod_avg_ms = mod_total_us / (ITERS * 1000.0);
+    double fus_avg_ms = fus_total_us / (ITERS * 1000.0);
+    printf("  ✓ Modular Pipeline Wall-Clock E2E: %8.2f ms\n", mod_avg_ms);
     printf("  ✓ Fused Pipeline Wall-Clock E2E:   %8.2f ms\n\n", fus_avg_ms);
 
     // Validation

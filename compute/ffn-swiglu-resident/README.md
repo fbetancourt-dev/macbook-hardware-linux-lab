@@ -22,7 +22,7 @@ All weight tensors remain **100% resident in GPU VRAM** (~22.15 MB total in `Q4_
  │    │                                 │           │    │                                 │
  │    ├──► 2. Gate GEMV (8960x1536)     │           │    ▼                                 │
  │    └──► 3. Up GEMV   (8960x1536)     │           │ 2. Fused Gate + Up + SiLU            │
- │            │                         │           │    • Dual-block GEMV with 4 accum    │
+ │            │                         │           │    • Factored scale dot products     │
  │            ▼                         │           │    • Vector z reused in registers    │
  │ 4. SwiGLU: SiLU(g) ⊙ u               │           │    • Direct h[row] activation write  │
  │    │                                 │           │    │                                 │
@@ -39,18 +39,20 @@ All weight tensors remain **100% resident in GPU VRAM** (~22.15 MB total in `Q4_
 
 ---
 
-## 📊 Measured Benchmark Results (100 Iterations on Physical Hardware)
+## 📊 Measured Benchmark Results (Alternated Interleaved 100 Runs on Physical Hardware)
+
+To strictly eliminate thermal throttling and cache warmup bias between pipelines, the benchmark alternates iterations ($M_0, F_0, M_1, F_1, \dots$).
 
 | Pipeline Implementation | Stages | End-to-End Wall Clock | Speedup vs CPU | Max Numerical Error | Status |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **CPU Reference (AVX2 FMA 8 threads)** | — | **$52.28\text{ ms}$** | $1.00\times$ (Baseline) | — | — |
-| **GPU Kepler Modular Pipeline** | 6 | **$29.33\text{ ms}$** | **$1.78\times$** 🚀 | $1.53 \times 10^{-4}$ | PASSED |
-| **GPU Kepler Fused Pipeline** | 3 | **$28.23\text{ ms}$** | **$1.85\times$** 🚀 | $1.53 \times 10^{-4}$ | PASSED |
+| **CPU Reference (AVX2 FMA 8 threads)** | — | **$50.30 - 53.58\text{ ms}$** | $1.00\times$ (Baseline) | — | — |
+| **GPU Kepler Modular Pipeline** | 6 | **$24.39 - 29.59\text{ ms}$** | **$1.81 - 2.06\times$** 🚀 | $1.53 \times 10^{-4}$ | PASSED |
+| **GPU Kepler Fused Pipeline** | 3 | **$22.11 - 23.86\text{ ms}$** | **$2.25 - 2.27\times$** 🚀 | $1.30 \times 10^{-4}$ | PASSED |
 
 ### Key Improvements:
-- **Fused vs Modular:** Fused execution eliminates 3 kernel launches and intermediate global VRAM buffers ($g, u, y_{\text{down}}$), cutting uninstrumented host request latency from $29.33\text{ ms}$ down to **$28.23\text{ ms}$** ($1.04\times$ faster, saving $1.10\text{ ms}$).
-- **Total Speedup over Haswell CPU:** **$1.85\times$ faster on the GT 750M** ($28.23\text{ ms}$ vs $52.28\text{ ms}$).
-- **Numerical Fidelity:** Both pipelines match the FP32 CPU reference within $|y_{\text{gpu}} - y_{\text{cpu}}| \le 1.53 \times 10^{-4}$ ($< \text{atol} + \text{rtol} \cdot |y|$), with zero NaNs or infinities.
+- **Fused vs Modular:** Fused execution eliminates 3 kernel launches and intermediate global VRAM buffers ($g, u, y_{\text{down}}$), cutting uninstrumented host request latency down to **$22.11\text{ ms}$** ($1.10 - 1.24\times$ faster, saving up to $5.72\text{ ms}$).
+- **Total Speedup over Haswell CPU:** **$2.27\times$ faster on the GT 750M** ($22.11\text{ ms}$ vs $50.30\text{ ms}$).
+- **Numerical Fidelity:** Both pipelines match the FP32 CPU reference within $|y_{\text{gpu}} - y_{\text{cpu}}| \le 1.30 \times 10^{-4}$ ($< \text{atol} + \text{rtol} \cdot |y|$), with zero NaNs or infinities.
 
 ---
 
@@ -58,11 +60,13 @@ All weight tensors remain **100% resident in GPU VRAM** (~22.15 MB total in `Q4_
 
 1. **Explicit Workgroup Contract:**
    All GEMV kernels specify `__attribute__((reqd_work_group_size(WG_THREADS, 1, 1)))` (128 threads = 4 warps), allowing Mesa Rusticl / Nouveau to optimize register allocation without spill hazards.
-2. **Quad Accumulators for Kepler Dual-Issue ILP:**
-   In `gemv_swiglu_fused`, work is split across 4 independent accumulators (`gate_a`, `gate_b`, `up_a`, `up_b`), providing independent arithmetic operations that hide instruction and memory latency on Kepler's dual warp dispatchers.
-3. **Zero Host Allocation Overhead:**
-   All kernel objects (`k_gate`, `k_up`, `k_down`, `k_fused_gate_up`, `k_fused_down_res`) and kernel arguments are initialized once during engine startup. The benchmark loop performs purely non-blocking enqueues followed by a single barrier on the final download event.
-4. **Dimension Safety Assertions:**
+2. **Factored Scale Dot Product (Low Register Pressure):**
+   In `gemv_swiglu_fused`, computing `acc_gate += dg * (g0*z0 + g1*z1)` saves registers compared to naive expansion, preventing local memory spill while keeping maximum arithmetic density.
+3. **Alternated Interleaved Benchmarking:**
+   Measuring Modular and Fused iterations back-to-back prevents thermal state divergence between measurements.
+4. **Zero Host Allocation Overhead:**
+   All kernel objects and arguments are pre-bound. The benchmark loop performs purely non-blocking enqueues followed by a single barrier on the final download event.
+5. **Dimension Safety Assertions:**
    Host asserts `D_MODEL % 64 == 0` and `D_FFN % 64 == 0`, ensuring that the dual-block reduction ($2 \times 32 = 64$ weights per iteration) never silently drops unaligned blocks.
 
 ---

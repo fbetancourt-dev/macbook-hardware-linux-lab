@@ -250,8 +250,8 @@ void gemv_swiglu_fused(
     __global const block_q4_0 *gate_blocks = is_valid_row ? (W_gate + row * nb) : NULL;
     __global const block_q4_0 *up_blocks   = is_valid_row ? (W_up   + row * nb) : NULL;
 
-    float gate_a = 0.0f, gate_b = 0.0f;
-    float up_a   = 0.0f, up_b   = 0.0f;
+    float acc_gate = 0.0f;
+    float acc_up   = 0.0f;
 
     __local float sh_gate[WG_THREADS];
     __local float sh_up[WG_THREADS];
@@ -273,8 +273,7 @@ void gemv_swiglu_fused(
             uchar qg = blk_g->qs[byte_idx];
             int g0 = (qg & 0x0F) - 8;
             int g1 = (qg >>   4) - 8;
-            gate_a += dg * ((float)g0 * z0);
-            gate_b += dg * ((float)g1 * z1);
+            acc_gate += dg * ((float)g0 * z0 + (float)g1 * z1);
 
             // Up block
             __global const block_q4_0 *blk_u = &up_blocks[b];
@@ -282,13 +281,12 @@ void gemv_swiglu_fused(
             uchar qu = blk_u->qs[byte_idx];
             int u0 = (qu & 0x0F) - 8;
             int u1 = (qu >>   4) - 8;
-            up_a += du * ((float)u0 * z0);
-            up_b += du * ((float)u1 * z1);
+            acc_up += du * ((float)u0 * z0 + (float)u1 * z1);
         }
     }
 
-    sh_gate[local_id] = gate_a + gate_b;
-    sh_up[local_id]   = up_a + up_b;
+    sh_gate[local_id] = acc_gate;
+    sh_up[local_id]   = acc_up;
     barrier(CLK_LOCAL_MEM_FENCE);
 
     if (lane_id < 16) {
