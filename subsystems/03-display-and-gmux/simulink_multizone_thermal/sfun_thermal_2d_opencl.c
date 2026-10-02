@@ -130,7 +130,7 @@ static void mdlInitializeSizes(SimStruct *S) {
     /* Input Port 0: 4 Actuator power inputs (u1, u2, u3, u4) */
     if (!ssSetNumInputPorts(S, 1)) return;
     ssSetInputPortWidth(S, 0, NUM_ZONES);
-    ssSetInputPortDirectFeedThrough(S, 0, 1);
+    ssSetInputPortDirectFeedThrough(S, 0, 0);
     ssSetInputPortRequiredContiguous(S, 0, 1);
 
     /* Output Port 0: 4 Measured temperatures (T1, T2, T3, T4) */
