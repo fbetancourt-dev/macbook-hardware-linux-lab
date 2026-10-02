@@ -2,17 +2,20 @@ CC = gcc
 CFLAGS = -O3 -mavx2 -mf16c -mfma -fopenmp -Wall -Wextra
 LDFLAGS = -lOpenCL -lm -fopenmp
 
-TARGET = test_real_layers
+TARGETS = test_real_layers test_28_layers_real
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): test_real_layers.c
+test_real_layers: test_real_layers.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
+test_28_layers_real: test_28_layers_real.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
 
-run: $(TARGET)
-	RUSTICL_ENABLE=nouveau ./$(TARGET)
+run: test_28_layers_real
+	RUSTICL_ENABLE=nouveau ./test_28_layers_real
 
 .PHONY: all clean run

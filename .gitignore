@@ -9,6 +9,7 @@ build/
 *.o
 profile_gaps
 test_real_layers
+test_28_layers_real
 
 
 # Python cache
