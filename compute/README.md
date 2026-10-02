@@ -22,7 +22,7 @@ High-performance physical simulations, control theory ensembles, and local Large
 
 ## ⚡ Architectural Division: GPU vs CPU
 
-* **GPU (NVIDIA GeForce GT 750M Kepler GK107):** Hosts both high-throughput **single-precision (FP32)** scientific simulations and the **complete 1.5B parameter Qwen2.5-Coder transformer model** (28 Decoder Layers + Output Norm + Full Q6_K LM Head) 100% resident in **1110 MB VRAM** (< 55% of 2 GB VRAM). Autoregressive decode executes at **$961\text{ ms/tok}$** ($1.04 - 1.1\text{ t/s}$), running **$2.23\times$ faster** than official `llama.cpp` on 8 Haswell CPU threads ($2143\text{ ms}$).
+* **GPU (NVIDIA GeForce GT 750M Kepler GK107):** Hosts high-throughput **single-precision (FP32)** scientific simulations alongside the resident layers of the **Qwen2.5-Coder-1.5B transformer model** (28 Decoder Layers + Output Norm + Full Q6_K LM Head + KV Cache) within an **1110 MB static VRAM budget** (< 55% of 2 GB VRAM; input embeddings prepared on CPU host). In autoregressive decode benchmarks, it achieves **$961\text{ ms/tok}$** ($1.04 - 1.1\text{ t/s}$), running **$2.23\times$ faster** than official `llama.cpp` on 8 Haswell CPU threads ($2143\text{ ms}$).
 * **CPU (Intel Core i7-4870HQ Haswell):** Used for token embedding dequantization/lookup before PCIe dispatch, large prompt batch prefill, fast host tokenizer execution, OS virtualization, and secondary LLM fallback.
 
 For OpenCL setup and driver configuration, see:

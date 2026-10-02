@@ -147,7 +147,7 @@ A high-performance persistent daemon resident in GT 750M VRAM paired with a tran
 #### Transactional Guarantees & Memory Consistency:
 1. **Staged Prepare & Atomic Replacement (Crash-Consistent Transaction):**
    - **Phase 1 (Prepare):** Prompt tokens are prefilled into GPU VRAM first. If the GPU rejects (e.g. `ERR_CONTEXT_FULL`), on-disk memory remains untouched.
-   - **Phase 2 (Commit):** On GPU confirmation (`OK`), facts file is written atomically (`facts.md.tmp` $\to$ `fsync()` $\to$ `os.replace` $\to$ directory `fsync()`), followed by atomic `memory_manifest.json` write. Recovery is guaranteed even across sudden crashes.
+   - **Phase 2 (Commit):** On GPU confirmation (`OK`), the facts file is written atomically (`facts.md.tmp` $\to$ `fsync()` $\to$ `os.replace` $\to$ directory `fsync()`), followed by atomic `memory_manifest.json` replacement. On-disk files remain the authoritative single source of truth; any crash, daemon restart, or divergence between VRAM and manifest triggers automatic full KV-cache reconstruction from disk facts prior to serving the next query.
 2. **Deterministic Content Fingerprinting:**
    - Instead of fragile mtime checks, `memory_manifest.json` tracks `prompt_content_hash = sha256(build_base_system_prompt())`. Any modification, addition, or deletion of memory immediately triggers automatic self-healing resynchronization.
 3. **Model & Binary Fingerprinting:**
@@ -155,6 +155,8 @@ A high-performance persistent daemon resident in GT 750M VRAM paired with a tran
 4. **Defensive Socket Accumulation & Bounds Validation:**
    - Socket reads accumulated strictly until `\n` with a 5-second `SO_RCVTIMEO` timeout. Truncated inputs safely rejected with `ERR_TRUNCATED_REQUEST`.
    - Token IDs and output token budgets strictly validated ($0 \le \text{tok} < \text{VOCAB\_SIZE}$, $0 < \text{max\_new} \le T_{\max}$, $\text{cur\_pos} + \text{tokens} + \text{max\_new} < T_{\max}$).
+5. **Per-Token OpenCL Command Drainage (`clFinish`):**
+   - In multi-token prefills (such as the 218-token base context dispatching over 67,000 OpenCL kernels across 28 layers), draining the command queue with `clFinish(queue)` after each completed token step serves as a validated hardware mitigation against driver command ring / fence saturation (`dma_fence_default_wait`) under Mesa Rusticl and Nouveau.
 
 ---
 

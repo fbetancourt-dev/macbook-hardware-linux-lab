@@ -817,17 +817,41 @@ int main(int argc, char **argv) {
 
             fprintf(stderr, "[qwen-server] Freezing %d base system tokens into KV cache (generation %d)...\n", n_tokens, base_generation + 1);
             uint64_t hash = 14695981039346656037ULL;
+            bool set_base_failed = false;
             for (int p = 0; p < n_tokens; p++) {
                 hash ^= (uint64_t)tokens[p];
                 hash *= 1099511628211ULL;
 
                 get_token_embedding(fd, off_embd, tokens[p], h_embd);
-                clEnqueueWriteBuffer(queue, ws.state, CL_TRUE, 0, sizeof(float)*D_MODEL, h_embd, 0, NULL, NULL);
+                cl_int cl_err = clEnqueueWriteBuffer(queue, ws.state, CL_TRUE, 0, sizeof(float)*D_MODEL, h_embd, 0, NULL, NULL);
+                if (cl_err != CL_SUCCESS) {
+                    fprintf(stderr, "[qwen-server] Error: clEnqueueWriteBuffer failed at token %d (err=%d)\n", p, cl_err);
+                    set_base_failed = true;
+                    break;
+                }
                 for (int l = 0; l < N_LAYERS; l++) {
                     gpu_decoder_layer_step(queue, &kernels[l], &w_dev[l], &kv_dev[l], &ws, p, p + 1);
                 }
-                clFinish(queue);
+                cl_err = clFinish(queue);
+                if (cl_err != CL_SUCCESS) {
+                    fprintf(stderr, "[qwen-server] Error: clFinish failed at token %d (err=%d)\n", p, cl_err);
+                    set_base_failed = true;
+                    break;
+                }
             }
+
+            if (set_base_failed) {
+                base_pos = 0;
+                g_base_hash = 0;
+                memory_state = "UNINITIALIZED";
+                free(tokens);
+                g_is_busy = 0;
+                const char *err_gpu = "ERR_GPU_FAILURE\n";
+                write(client_sock, err_gpu, strlen(err_gpu));
+                close(client_sock);
+                continue;
+            }
+
             base_pos = n_tokens;
             g_base_hash = hash;
             base_generation++;
@@ -876,7 +900,7 @@ int main(int argc, char **argv) {
                 char *endptr = NULL;
                 errno = 0;
                 long val_max = strtol(token_str, &endptr, 10);
-                if (errno != 0 || endptr == token_str || *endptr != '\0') {
+                if (errno != 0 || endptr == token_str || *endptr != '\0' || val_max <= 0 || val_max > T_MAX) {
                     tok_invalid = true;
                 } else {
                     max_new_tokens = (int)val_max;
