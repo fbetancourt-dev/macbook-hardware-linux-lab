@@ -897,7 +897,7 @@ int main(void) {
         // 1. GPU FORWARD PASS (28 Layers + Output Norm + Full LM Head)
         double t_gpu_0 = get_time_us();
 
-        clEnqueueWriteBuffer(queue, ws.state, CL_FALSE, 0, sizeof(float) * D_MODEL, h_embd, 0, NULL, NULL);
+        clEnqueueWriteBuffer(queue, ws.state, CL_TRUE, 0, sizeof(float) * D_MODEL, h_embd, 0, NULL, NULL);
 
         for (int l = 0; l < N_LAYERS; l++) {
             gpu_decoder_layer_step(queue, &kernels[l], &w_dev[l], &kv_dev[l], &ws, 0, 1);
@@ -931,7 +931,7 @@ int main(void) {
         double ms_gpu_e2e = (t_gpu_1 - t_gpu_0) / 1000.0;
         printf("GPU GT 750M Total End-to-End Latency: %.2f ms (28 Layers + Norm + LM Head)\n", ms_gpu_e2e);
 
-        // 2. CPU FORWARD PASS (28 Layers + Output Norm)
+        // 2. CPU FORWARD PASS (28 Layers + Output Norm + Full LM Head on 8 threads)
         double t_cpu_0 = get_time_us();
         float cpu_state[D_MODEL], next_state[D_MODEL];
         memcpy(cpu_state, h_embd, sizeof(float) * D_MODEL);
@@ -946,58 +946,81 @@ int main(void) {
         float scale = 1.0f / sqrtf((sum_sq / (float)D_MODEL) + EPSILON);
         float z_cpu_norm[D_MODEL];
         for (int i = 0; i < D_MODEL; i++) z_cpu_norm[i] = cpu_state[i] * scale * gamma_output_norm[i];
-        double t_cpu_1 = get_time_us();
-        printf("CPU Haswell (8 threads) Latency:      %.2f ms (Speedup: %.2fx)\n\n",
-               (t_cpu_1 - t_cpu_0) / 1000.0, ((t_cpu_1 - t_cpu_0) / 1000.0) / ms_gpu_e2e);
 
-        // 3. Extract Top-5 Candidates on GPU Logits
-        TokenCandidate top5[5];
+        // Compute entire LM head on CPU (151,936 rows)
+        float *h_logits_cpu = (float*)malloc(sizeof(float) * VOCAB_SIZE);
+        #pragma omp parallel for schedule(static)
+        for (int row = 0; row < VOCAB_SIZE; row++) {
+            float dequant[D_MODEL];
+            dequantize_row_q6_k_ref(h_head + (size_t)row * HEAD_BYTES_PER_ROW, dequant, D_MODEL);
+            float sum = 0.0f;
+            for (int j = 0; j < D_MODEL; j++) sum += dequant[j] * z_cpu_norm[j];
+            h_logits_cpu[row] = sum;
+        }
+
+        double t_cpu_1 = get_time_us();
+        double ms_cpu_e2e = (t_cpu_1 - t_cpu_0) / 1000.0;
+        printf("CPU Haswell (8 threads) Latency:      %.2f ms (Complete 28L + Norm + LM Head | Speedup: %.2fx)\n\n",
+               ms_cpu_e2e, ms_cpu_e2e / ms_gpu_e2e);
+
+        // 3. GLOBAL VERIFICATION OVER ALL 151,936 VOCABULARY LOGITS
+        float global_max_abs_err = 0.0f;
+        int non_finite_count = 0;
+        for (int i = 0; i < VOCAB_SIZE; i++) {
+            if (!isfinite(h_logits_gpu[i]) || !isfinite(h_logits_cpu[i])) {
+                non_finite_count++;
+            }
+            float err = fabsf(h_logits_gpu[i] - h_logits_cpu[i]);
+            if (err > global_max_abs_err) global_max_abs_err = err;
+        }
+
+        // Independently rank GPU and CPU Top-5
+        TokenCandidate top5_gpu[5], top5_cpu[5];
         for (int k = 0; k < 5; k++) {
-            top5[k].token_id = -1;
-            top5[k].logit = -1e30f;
+            top5_gpu[k].token_id = -1; top5_gpu[k].logit = -1e30f;
+            top5_cpu[k].token_id = -1; top5_cpu[k].logit = -1e30f;
         }
 
         for (int i = 0; i < VOCAB_SIZE; i++) {
-            float val = h_logits_gpu[i];
+            float val_g = h_logits_gpu[i];
             for (int k = 0; k < 5; k++) {
-                if (val > top5[k].logit) {
-                    for (int j = 4; j > k; j--) top5[j] = top5[j - 1];
-                    top5[k].token_id = i;
-                    top5[k].logit = val;
+                if (val_g > top5_gpu[k].logit) {
+                    for (int j = 4; j > k; j--) top5_gpu[j] = top5_gpu[j - 1];
+                    top5_gpu[k].token_id = i;
+                    top5_gpu[k].logit = val_g;
+                    break;
+                }
+            }
+
+            float val_c = h_logits_cpu[i];
+            for (int k = 0; k < 5; k++) {
+                if (val_c > top5_cpu[k].logit) {
+                    for (int j = 4; j > k; j--) top5_cpu[j] = top5_cpu[j - 1];
+                    top5_cpu[k].token_id = i;
+                    top5_cpu[k].logit = val_c;
                     break;
                 }
             }
         }
 
-        // Verify top candidates against CPU reference projection
-        float top_cpu_logits[5];
-        for (int k = 0; k < 5; k++) {
-            int tok = top5[k].token_id;
-            float dequant[D_MODEL];
-            dequantize_row_q6_k_ref(h_head + (size_t)tok * HEAD_BYTES_PER_ROW, dequant, D_MODEL);
-            float sum = 0.0f;
-            for (int i = 0; i < D_MODEL; i++) sum += dequant[i] * z_cpu_norm[i];
-            top_cpu_logits[k] = sum;
-        }
+        float cpu_delta = top5_cpu[0].logit - top5_cpu[1].logit;
+        bool argmax_match = (top5_gpu[0].token_id == top5_cpu[0].token_id);
 
-        float delta = top_cpu_logits[0] - top_cpu_logits[1];
-        float max_abs_err = 0.0f;
+        printf("------------------------------------------------------------------------------------------------------------------\n");
+        printf(" INDEPENDENT TOP-5 RANKINGS COMPARISON (Total Vocab = 151,936):\n");
+        printf("------------------------------------------------------------------------------------------------------------------\n");
+        printf("Rank | GPU Token (Logit)         | CPU Token (Logit)         | Decoded Text         | Abs Error   | Status\n");
+        printf("------------------------------------------------------------------------------------------------------------------\n");
         for (int k = 0; k < 5; k++) {
-            float err = fabsf(top5[k].logit - top_cpu_logits[k]);
-            if (err > max_abs_err) max_abs_err = err;
-        }
+            int g_tok = top5_gpu[k].token_id;
+            int c_tok = top5_cpu[k].token_id;
+            float g_val = top5_gpu[k].logit;
+            float c_val = (g_tok >= 0) ? h_logits_cpu[g_tok] : 0.0f;
+            float err = fabsf(g_val - c_val);
 
-        printf("--------------------------------------------------------------------------------------------------------\n");
-        printf(" TOP-5 PREDICTED CONTINUATION TOKENS (Total Vocab = 151,936):\n");
-        printf("--------------------------------------------------------------------------------------------------------\n");
-        printf("Rank | Token ID | Decoded Text         | GPU Logit    | CPU Logit    | Abs Error   | Status\n");
-        printf("--------------------------------------------------------------------------------------------------------\n");
-        for (int k = 0; k < 5; k++) {
-            float err = fabsf(top5[k].logit - top_cpu_logits[k]);
-            int tok = top5[k].token_id;
             char esc_text[64] = {0};
-            if (vocab_tokens && tok >= 0 && tok < n_vocab_tokens) {
-                const char *src = vocab_tokens[tok];
+            if (vocab_tokens && g_tok >= 0 && g_tok < n_vocab_tokens) {
+                const char *src = vocab_tokens[g_tok];
                 int dst = 0;
                 for (int s = 0; src[s] && dst < 40; s++) {
                     if (src[s] == '\n') { esc_text[dst++] = '\\'; esc_text[dst++] = 'n'; }
@@ -1009,25 +1032,31 @@ int main(void) {
                 snprintf(esc_text, sizeof(esc_text), "<unk>");
             }
 
-            printf("#%d   | %-8d | '%-18s' | %12.4f | %12.4f | %11.4e | %s\n",
-                   k + 1, tok, esc_text, top5[k].logit, top_cpu_logits[k], err,
-                   (k == 0) ? "<- [Top-1 ArgMax Match!]" : "");
+            printf("#%d   | %-6d (%11.4f)     | %-6d (%11.4f)     | '%-18s' | %11.4e | %s\n",
+                   k + 1, g_tok, g_val, c_tok, top5_cpu[k].logit, esc_text, err,
+                   (g_tok == c_tok) ? "RANK MATCH" : "DISCREPANCY");
         }
-        printf("--------------------------------------------------------------------------------------------------------\n");
+        printf("------------------------------------------------------------------------------------------------------------------\n");
 
-        printf("ArgMax Numerical Stability Analysis:\n");
-        printf("  Margin between Top-1 and Top-2 (Delta): %.4f\n", delta);
-        printf("  Maximum Logit Error (eps_inf):          %.4e\n", max_abs_err);
-        printf("  Sufficient Condition (Delta > 2*eps):   %s (%.4f > %.4e)\n",
-               (delta > 2.0f * max_abs_err) ? "MET [GUARANTEED PRESERVATION OF ARGMAX]" : "INSPECT",
-               delta, 2.0f * max_abs_err);
+        printf("Rigorous Global Mathematical Verification (All 151,936 Logits):\n");
+        printf("  Finite Floating-Point Health:         %s (Non-finite tokens: %d)\n",
+               (non_finite_count == 0) ? "PASS [100% FINITE]" : "FAIL", non_finite_count);
+        printf("  Global Maximum Logit Error (eps_inf): %.4e (over ALL 151,936 logits)\n", global_max_abs_err);
+        printf("  CPU Ground Truth Margin (Delta):      %.4f\n", cpu_delta);
+        printf("  Global Sufficient Condition:          %s (Delta=%.4f > 2*eps_inf=%.4e)\n",
+               (cpu_delta > 2.0f * global_max_abs_err) ? "MET [PROVEN GLOBAL ARGMAX INVARIANCE]" : "NOT MET",
+               cpu_delta, 2.0f * global_max_abs_err);
+        printf("  Direct ArgMax Token Match:            %s (GPU Top-1=%d, CPU Top-1=%d)\n",
+               argmax_match ? "VERIFIED IDENTICAL" : "FAILED", top5_gpu[0].token_id, top5_cpu[0].token_id);
 
-        printf("  Top-1 Predicted Continuation: '%s' (Token ID %d)\n",
-               vocab_tokens ? vocab_tokens[top5[0].token_id] : "?", top5[0].token_id);
+        printf("  Winner Predicted Next Token:          '%s' (Token ID %d)\n\n",
+               vocab_tokens ? vocab_tokens[top5_gpu[0].token_id] : "?", top5_gpu[0].token_id);
 
         free(h_logits_gpu);
+        free(h_logits_cpu);
     }
 
     close(fd);
     return 0;
 }
+
