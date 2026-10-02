@@ -7,6 +7,9 @@ slprj/
 # Build artifacts
 build/
 *.o
+profile_gaps
+test_real_layers
+
 
 # Python cache
 __pycache__/
