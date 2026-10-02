@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os
 import sys
+import time
+import json
 import fcntl
 import socket
 import argparse
@@ -12,6 +14,8 @@ TOKENIZER_BIN = "/home/fbetancourt/Applications/llama.cpp/bin/llama-tokenize"
 CONFIG_DIR = os.path.expanduser("~/.config/local_llm")
 PROFILE_FILE = os.path.join(CONFIG_DIR, "profile.md")
 FACTS_FILE = os.path.join(CONFIG_DIR, "facts.md")
+LOCK_FILE = os.path.join(CONFIG_DIR, "facts.lock")
+MANIFEST_FILE = os.path.join(CONFIG_DIR, "memory_manifest.json")
 
 def get_socket_path():
     xdg = os.environ.get("XDG_RUNTIME_DIR")
@@ -71,6 +75,30 @@ def build_base_system_prompt():
     combined = "\n\n".join(parts)
     return f"<|im_start|>system\n{combined}<|im_end|>\n"
 
+def write_manifest(gen: int, b_hash: str, b_pos: int, last_fact: str = ""):
+    manifest = {
+        "base_generation": gen,
+        "base_hash": b_hash,
+        "base_pos": b_pos,
+        "model_path": MODEL_PATH,
+        "t_max": 4096,
+        "memory_state": "READY",
+        "last_fact_added": last_fact,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S %z")
+    }
+    man_tmp = MANIFEST_FILE + ".tmp"
+    with open(man_tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(man_tmp, MANIFEST_FILE)
+
+    dir_fd = os.open(CONFIG_DIR, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
 def sync_base_memory(verbose=False):
     s = connect_socket()
     if not s:
@@ -88,65 +116,98 @@ def sync_base_memory(verbose=False):
     s.close()
     if verbose:
         print(f"[*] Servidor: {resp}", file=sys.stderr)
-    return "OK" in resp
+
+    if "OK" in resp:
+        m_pos = re.search(r'base_pos=(\d+)', resp)
+        m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
+        m_gen = re.search(r'base_generation=(\d+)', resp)
+        b_pos = int(m_pos.group(1)) if m_pos else len(tokens)
+        b_hash = m_hash.group(1) if m_hash else "0x0"
+        b_gen = int(m_gen.group(1)) if m_gen else 1
+        write_manifest(b_gen, b_hash, b_pos)
+        return True
+    return False
 
 def remember_fact(fact: str):
     os.makedirs(CONFIG_DIR, exist_ok=True)
+    lock_fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
-    # 1. Leer hechos existentes
-    existing_facts = ""
-    if os.path.exists(FACTS_FILE):
-        with open(FACTS_FILE, "r", encoding="utf-8") as f:
-            existing_facts = f.read()
+        # 1. Leer hechos existentes
+        existing_facts = ""
+        if os.path.exists(FACTS_FILE):
+            with open(FACTS_FILE, "r", encoding="utf-8") as f:
+                existing_facts = f.read()
 
-    if not existing_facts.strip():
-        new_facts_content = f"# Verified Facts & Learned Context\n- {fact.strip()}\n"
-    else:
-        new_facts_content = existing_facts.rstrip() + f"\n- {fact.strip()}\n"
+        if not existing_facts.strip():
+            new_facts_content = f"# Verified Facts & Learned Context\n- {fact.strip()}\n"
+        else:
+            new_facts_content = existing_facts.rstrip() + f"\n- {fact.strip()}\n"
 
-    # 2. Construir prompt del sistema candidato
-    profile = ""
-    if os.path.exists(PROFILE_FILE):
-        with open(PROFILE_FILE, "r", encoding="utf-8") as f:
-            profile = f.read().strip()
+        # 2. Construir prompt del sistema candidato
+        profile = ""
+        if os.path.exists(PROFILE_FILE):
+            with open(PROFILE_FILE, "r", encoding="utf-8") as f:
+                profile = f.read().strip()
 
-    parts = []
-    if profile:
-        parts.append(profile)
-    parts.append(new_facts_content.strip())
-    staged_sys_text = f"<|im_start|>system\n{'\n\n'.join(parts)}<|im_end|>\n"
+        parts = []
+        if profile:
+            parts.append(profile)
+        parts.append(new_facts_content.strip())
+        staged_sys_text = f"<|im_start|>system\n{'\n\n'.join(parts)}<|im_end|>\n"
 
-    # 3. Tokenizar y enviar a GPU (Fase 1: Prepare & Prefill)
-    tokens = tokenize(staged_sys_text)
-    print(f"[*] Fase 1 (Prepare): Validando {len(tokens)} tokens candidatos en GPU VRAM...", file=sys.stderr)
+        # 3. Tokenizar y enviar a GPU (Fase 1: Prepare & Prefill)
+        tokens = tokenize(staged_sys_text)
+        print(f"[*] Fase 1 (Prepare): Validando {len(tokens)} tokens candidatos en GPU VRAM...", file=sys.stderr)
 
-    s = connect_socket()
-    if not s:
-        print("❌ Error: qwen_server daemon no responde. Memoria no modificada.", file=sys.stderr)
-        return False
+        s = connect_socket()
+        if not s:
+            print("❌ Error: qwen_server daemon no responde. Memoria no modificada.", file=sys.stderr)
+            return False
 
-    req = f"SET_BASE {','.join(map(str, tokens))}\n"
-    s.sendall(req.encode())
-    resp = s.recv(1024).decode('utf-8', errors='replace').strip()
-    s.close()
+        req = f"SET_BASE {','.join(map(str, tokens))}\n"
+        s.sendall(req.encode())
+        resp = s.recv(1024).decode('utf-8', errors='replace').strip()
+        s.close()
 
-    if "OK" not in resp:
-        print(f"❌ Error en prefill de GPU: {resp}. Transacción abortada (disco intacto).", file=sys.stderr)
-        return False
+        if "OK" not in resp:
+            print(f"❌ Error en prefill de GPU: {resp}. Transacción abortada (disco intacto).", file=sys.stderr)
+            return False
 
-    # 4. Fase 2 (Commit): GPU confirmó OK -> reemplazar atómicamente en disco
-    tmp_file = FACTS_FILE + ".tmp"
-    with open(tmp_file, "w", encoding="utf-8") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.write(new_facts_content)
-        f.flush()
-        os.fsync(f.fileno())
-        fcntl.flock(f, fcntl.LOCK_UN)
+        m_pos = re.search(r'base_pos=(\d+)', resp)
+        m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
+        m_gen = re.search(r'base_generation=(\d+)', resp)
+        b_pos = int(m_pos.group(1)) if m_pos else len(tokens)
+        b_hash = m_hash.group(1) if m_hash else "0x0"
+        b_gen = int(m_gen.group(1)) if m_gen else 1
 
-    os.replace(tmp_file, FACTS_FILE)
-    print(f"✅ Fase 2 (Commit): Memoria persistida atómicamente en {FACTS_FILE}")
-    print(f"[*] Servidor GPU: {resp}")
-    return True
+        # 4. Fase 2 (Commit): GPU confirmó OK -> reemplazar atómicamente facts.md con fsync
+        tmp_file = FACTS_FILE + ".tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            f.write(new_facts_content)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_file, FACTS_FILE)
+
+        # Fsync directorio para garantizar persistencia física del journaling
+        dir_fd = os.open(CONFIG_DIR, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+        # 5. Persistir Memory Manifest
+        write_manifest(b_gen, b_hash, b_pos, last_fact=fact.strip())
+
+        print(f"✅ Fase 2 (Commit): Memoria persistida atómicamente en {FACTS_FILE}")
+        print(f"📄 Manifiesto actualizado: {MANIFEST_FILE} (Gen {b_gen}, Hash {b_hash})")
+        print(f"[*] Servidor GPU: {resp}")
+        return True
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 def main():
     parser = argparse.ArgumentParser(description="ask-qwen: Local GPU AI CLI on NVIDIA GT 750M via qwen_server")
@@ -170,6 +231,13 @@ def main():
         st = get_status(s)
         s.close()
         print(f"📊 Estado del Daemon Qwen (GT 750M Kepler OpenCL 3.0):\n  {st}")
+        if os.path.exists(MANIFEST_FILE):
+            try:
+                with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
+                    man = json.load(f)
+                print(f"📄 Manifiesto en Disco:\n  Gen: {man.get('base_generation')} | Hash: {man.get('base_hash')} | Tokens: {man.get('base_pos')} | Actualizado: {man.get('updated_at')}")
+            except Exception:
+                pass
         return 0
 
     if args.sync_memory:
