@@ -8,6 +8,7 @@ High-performance physical simulations, control theory ensembles, and local Large
 
 | Module | Category | Hardware Target | Description | Primary Interfaces |
 | :--- | :--- | :--- | :--- | :--- |
+| **[`gemv-kepler-benchmark/`](gemv-kepler-benchmark/)** | Microbenchmarks | NVIDIA GT 750M vs Haswell AVX2 | Warp-coalesced Q4_0 GEMV with FP32 accumulation ($3.10\times$ GPU speedup) | OpenCL 3.0 + C99 AVX2 |
 | **[`cartpole/`](cartpole/)** | Dynamics & Control | NVIDIA GT 750M (OpenCL FP32) | 1,024-pendulum parallel GPU ensemble + 60 FPS interactive steering visualizer | OpenCL C-MEX + MATLAB Simulink |
 | **[`thermal-control/`](thermal-control/)** | PDE & Process Control | NVIDIA GT 750M (OpenCL FP32) | 2D heat diffusion PDE ($256 \times 256$ grid) with multi-zone anti-windup PID | OpenCL C-MEX + MATLAB Simulink |
 | **[`simulink-opencl-bridge/`](simulink-opencl-bridge/)** | Architecture | NVIDIA GT 750M (Mesa Rusticl) | Generic zero-allocation Level-2 C-MEX gateway architecture for Simulink | OpenCL 3.0 + Simulink Engine |
@@ -18,8 +19,8 @@ High-performance physical simulations, control theory ensembles, and local Large
 
 ## ⚡ Architectural Division: GPU vs CPU
 
-* **GPU (NVIDIA GeForce GT 750M Kepler):** Dedicated to **single-precision (FP32)** scientific computing and PDE solvers. Delivers massive parallel throughput across 384 CUDA cores via Mesa Rusticl OpenCL 3.0.
-* **CPU (Intel Core i7-4870HQ Haswell):** Dedicated to **Local LLMs** via AVX2/FMA3 256-bit vector SIMD. Delivers 10–12 tokens/sec for coding autocompletion without being hindered by Kepler's lack of native FP16 execution units.
+* **GPU (NVIDIA GeForce GT 750M Kepler):** Dedicated to **single-precision (FP32)** scientific computing and quantized GEMV operations. Delivers up to $3.10\times$ speedup over Haswell CPU when memory transactions are warp-coalesced.
+* **CPU (Intel Core i7-4870HQ Haswell):** Dedicated to **full pipeline Local LLM inference** via AVX2/FMA3 256-bit vector SIMD for everyday pair programming in Continue.
 
 For OpenCL setup and driver configuration, see:
 * [`../docs/opencl-rusticl-setup.md`](../docs/opencl-rusticl-setup.md): Package installation, `RUSTICL_ENABLE=nouveau`, and isolating Vulkan workloads.
