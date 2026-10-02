@@ -53,10 +53,20 @@ def tokenize(text: str):
             tokens.append(int(m.group(1)))
     return tokens
 
+def read_response_line(sock):
+    buf = []
+    while True:
+        chunk = sock.recv(1024)
+        if not chunk:
+            break
+        buf.append(chunk)
+        if b'\n' in chunk:
+            break
+    return b''.join(buf).decode('utf-8', errors='replace').strip()
+
 def get_status(sock):
     sock.sendall(b"STATUS\n")
-    data = sock.recv(1024).decode('utf-8', errors='replace').strip()
-    return data
+    return read_response_line(sock)
 
 def build_base_system_prompt():
     profile = ""
@@ -118,10 +128,13 @@ def get_chat_template_hash():
     return hashlib.sha256(tmpl.encode()).hexdigest()[:16]
 
 def write_manifest(gen: int, b_hash: str, b_pos: int, last_fact: str = ""):
+    prompt_content = build_base_system_prompt()
+    prompt_content_hash = hashlib.sha256(prompt_content.encode("utf-8")).hexdigest()[:16]
     manifest = {
         "base_generation": gen,
         "base_hash": b_hash,
         "base_pos": b_pos,
+        "prompt_content_hash": prompt_content_hash,
         "model_path": MODEL_PATH,
         "model_sha256": get_model_sha256(),
         "tokenizer_hash": get_tokenizer_hash(),
@@ -161,21 +174,24 @@ def sync_base_memory(verbose=False):
 
         req = f"SET_BASE {','.join(map(str, tokens))}\n"
         s.sendall(req.encode())
-        resp = s.recv(1024).decode('utf-8', errors='replace').strip()
+        resp = read_response_line(s)
         s.close()
         if verbose:
             print(f"[*] Servidor: {resp}", file=sys.stderr)
 
-        if "OK" in resp:
-            m_pos = re.search(r'base_pos=(\d+)', resp)
-            m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
-            m_gen = re.search(r'base_generation=(\d+)', resp)
-            b_pos = int(m_pos.group(1)) if m_pos else len(tokens)
-            b_hash = m_hash.group(1) if m_hash else "0x0"
-            b_gen = int(m_gen.group(1)) if m_gen else 1
+        m_pos = re.search(r'base_pos=(\d+)', resp)
+        m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
+        m_gen = re.search(r'base_generation=(\d+)', resp)
+        if "OK" in resp and m_pos and m_hash and m_gen:
+            b_pos = int(m_pos.group(1))
+            b_hash = m_hash.group(1)
+            b_gen = int(m_gen.group(1))
             write_manifest(b_gen, b_hash, b_pos)
             return True
-        return False
+        else:
+            if verbose:
+                print(f"❌ Respuesta inválida o incompleta del servidor: {resp}", file=sys.stderr)
+            return False
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
@@ -220,19 +236,20 @@ def remember_fact(fact: str):
 
         req = f"SET_BASE {','.join(map(str, tokens))}\n"
         s.sendall(req.encode())
-        resp = s.recv(1024).decode('utf-8', errors='replace').strip()
+        resp = read_response_line(s)
         s.close()
-
-        if "OK" not in resp:
-            print(f"❌ Error en prefill de GPU: {resp}. Transacción abortada (disco intacto).", file=sys.stderr)
-            return False
 
         m_pos = re.search(r'base_pos=(\d+)', resp)
         m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
         m_gen = re.search(r'base_generation=(\d+)', resp)
-        b_pos = int(m_pos.group(1)) if m_pos else len(tokens)
-        b_hash = m_hash.group(1) if m_hash else "0x0"
-        b_gen = int(m_gen.group(1)) if m_gen else 1
+
+        if "OK" not in resp or not (m_pos and m_hash and m_gen):
+            print(f"❌ Error o respuesta incompleta en prefill de GPU: {resp}. Transacción abortada (disco intacto).", file=sys.stderr)
+            return False
+
+        b_pos = int(m_pos.group(1))
+        b_hash = m_hash.group(1)
+        b_gen = int(m_gen.group(1))
 
         # 4. Fase 2 (Commit): GPU confirmó OK -> reemplazar atómicamente facts.md con fsync
         tmp_file = FACTS_FILE + ".tmp"
@@ -314,9 +331,23 @@ def main():
     st = get_status(s)
     s.close()
 
+    # Active verification: check if server loaded the same model weights as on disk
+    m_srv_sha = re.search(r'model_sha256=([0-9a-fA-F]+)', st)
+    if m_srv_sha:
+        srv_sha = m_srv_sha.group(1).lower()
+        cli_sha = get_model_sha256().lower()
+        if srv_sha != cli_sha and srv_sha != "unknown":
+            print("❌ Error crítico: El modelo GGUF en disco ha cambiado respecto al residente en VRAM.", file=sys.stderr)
+            print(f"   Disco: {cli_sha}\n   VRAM:  {srv_sha}", file=sys.stderr)
+            print("   Reinicia el servidor para cargar los nuevos pesos: RUSTICL_ENABLE=nouveau ./qwen_server", file=sys.stderr)
+            return 1
+
     need_rebuild = False
     m_server_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', st)
     server_hash = m_server_hash.group(1).lower() if m_server_hash else ""
+
+    cur_prompt = build_base_system_prompt()
+    cur_prompt_hash = hashlib.sha256(cur_prompt.encode("utf-8")).hexdigest()[:16]
 
     if "base_pos=0" in st or "memory_state=READY" not in st:
         need_rebuild = True
@@ -329,13 +360,14 @@ def main():
             manifest_hash = str(man.get("base_hash", "")).lower()
             if not server_hash or server_hash != manifest_hash:
                 need_rebuild = True
-            else:
-                # Also verify if facts or profile were edited on disk after manifest
-                man_mtime = os.path.getmtime(MANIFEST_FILE)
-                if os.path.exists(FACTS_FILE) and os.path.getmtime(FACTS_FILE) > man_mtime:
-                    need_rebuild = True
-                if os.path.exists(PROFILE_FILE) and os.path.getmtime(PROFILE_FILE) > man_mtime:
-                    need_rebuild = True
+            elif man.get("prompt_content_hash") != cur_prompt_hash:
+                need_rebuild = True
+            elif man.get("model_sha256") != get_model_sha256():
+                need_rebuild = True
+            elif man.get("tokenizer_hash") != get_tokenizer_hash():
+                need_rebuild = True
+            elif man.get("chat_template_hash") != get_chat_template_hash():
+                need_rebuild = True
         except Exception:
             need_rebuild = True
 

@@ -34,12 +34,13 @@ This repository transforms the 2014 MacBook Pro into a dual-purpose engineering 
 * **[`compute/simulink-opencl-bridge/`](compute/simulink-opencl-bridge/):** Zero-allocation Level-2 C-MEX gateway architecture for streaming data between MATLAB Simulink and OpenCL kernels.
 * **[`compute/opencl-basics/`](compute/opencl-basics/):** Standalone C OpenCL kernels demonstrating $17.95\times$ speedup on N-body gravitation and 412M updates/sec 2D Laplacian stencils.
 
-### 🤖 Track 2: Local AI & Coding Assistance on Haswell AVX2 ([`compute/local-llm/`](compute/local-llm/))
-* **[`compute/local-llm/`](compute/local-llm/):** Production deployment of `llama.cpp` and Ollama for developer pair programming.
-  * **Architectural Hardware Boundary:** Proves empirically why LLM quantization kernels (`Q4_K`, `Q5_K`) execute on CPU AVX2 rather than legacy Kepler GPUs due to the silicon-level absence of native `cl_khr_fp16` in GK107.
-  * **Models & Benchmarks:** Qwen2.5-Coder 1.5B (11.5–12.6 t/s) and DeepSeek-Coder (1.3B fast autocomplete at 9.7 t/s vs 6.7B deliberate chat).
-  * **Integration:** OpenAI-compatible API on `127.0.0.1:8080` powering code autocompletion in **Continue (VS Code)**.
-  * **Stability:** Zero desktop crashes by isolating compute from experimental Vulkan NVK paths (`OLLAMA_VULKAN=false`).
+### 🤖 Track 2: GPU-Accelerated Resident Transformer & Local AI ([`compute/gguf-real-weights-loader/`](compute/gguf-real-weights-loader/) & [`compute/local-llm/`](compute/local-llm/))
+* **[`compute/gguf-real-weights-loader/`](compute/gguf-real-weights-loader/):** Complete 28-layer + LM Head Transformer pipeline executing 100% resident in GT 750M VRAM (1110 MB allocated) for **Qwen2.5-Coder-1.5B**.
+  * **Hardware Breakthrough:** Overcomes the absence of silicon-level `cl_khr_fp16` on Kepler GK107 via custom warp-coalesced OpenCL kernels with FP32 software accumulation.
+  * **Empirical Speedup:** Achieves **$961\text{ ms/tok}$** in autoregressive decode (**$2.23\times$ faster** than official `llama.cpp` on 8 Haswell CPU threads at $2143\text{ ms}$), with token-by-token output **100% bit-for-bit identical** to llama.cpp.
+  * **Production Daemon (`qwen_server`):** Persistent Unix domain socket daemon with prefilled frozen base KV cache (`SET_BASE`), socket streaming, and zero repeat latency for system context.
+  * **Transactional Memory CLI (`ask-qwen`):** Pair programming CLI with 2-phase commit (`facts.md.tmp` $\to$ fsync $\to$ atomic replace), concurrency lock (`facts.lock`), and deterministic content-hash self-healing memory verification.
+* **[`compute/local-llm/`](compute/local-llm/):** CPU-side Haswell AVX2/FMA3 pipeline for high-batch prompt prefill and background `llama-server` integration powering **Continue** in VS Code.
 
 ### 🛠️ Track 3: Proprietary Apple Hardware Reverse Engineering & Linux Drivers ([`hardware/`](hardware/))
 * **[`hardware/camera-bcm1570/`](hardware/camera-bcm1570/):** Complete reverse engineering of the Broadcom BCM1570 PCIe ISP FaceTime HD camera, DDR ringbuffer IPC protocol, and out-of-tree V4L2 driver (`bcwc_pcie`).

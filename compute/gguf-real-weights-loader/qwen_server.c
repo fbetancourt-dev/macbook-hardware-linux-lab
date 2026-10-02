@@ -462,6 +462,21 @@ static int base_pos = 0;
 static int base_generation = 0;
 static const char *memory_state = "UNINITIALIZED";
 static const char *g_model_path = "/home/fbetancourt/Gemini/models/qwen2.5-coder-1.5b-instruct-q4_0.gguf";
+static char g_model_sha256[65] = "unknown";
+
+static void resolve_model_sha256(const char *path) {
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "sha256sum %s 2>/dev/null", path);
+    FILE *fp = popen(cmd, "r");
+    if (fp) {
+        if (fscanf(fp, "%64s", g_model_sha256) == 1) {
+            pclose(fp);
+            return;
+        }
+        pclose(fp);
+    }
+    strncpy(g_model_sha256, "unknown", sizeof(g_model_sha256));
+}
 
 static void clean_exit_handler(int sig) {
     (void)sig;
@@ -700,7 +715,8 @@ int main(int argc, char **argv) {
         perror("listen"); exit(1);
     }
 
-    fprintf(stderr, "Ready for queries on %s (symlink: /tmp/qwen.sock)\n\n", g_active_sock);
+    resolve_model_sha256(g_model_path);
+    fprintf(stderr, "Ready for queries on %s (symlink: /tmp/qwen.sock) [Model SHA256: %s]\n\n", g_active_sock, g_model_sha256);
 
     float *h_logits = (float*)malloc(sizeof(float) * VOCAB_SIZE);
     float h_embd[D_MODEL];
@@ -721,18 +737,31 @@ int main(int argc, char **argv) {
             continue;
         }
 
+        // Set 5-second timeout on client reads to prevent hanging the server thread
+        struct timeval tv;
+        tv.tv_sec = 5;
+        tv.tv_usec = 0;
+        setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
         // Read request line until '\n'
         size_t total_read = 0;
+        bool found_nl = false;
         while (total_read < sizeof(req_buf) - 1) {
             ssize_t n = read(client_sock, req_buf + total_read, 1);
             if (n <= 0) break;
             if (req_buf[total_read] == '\n') {
                 req_buf[total_read] = '\0';
+                found_nl = true;
                 break;
             }
             total_read++;
         }
-        if (total_read == 0) { close(client_sock); continue; }
+        if (!found_nl || total_read == 0) {
+            const char *err_trunc = "ERR_TRUNCATED_REQUEST\n";
+            write(client_sock, err_trunc, strlen(err_trunc));
+            close(client_sock);
+            continue;
+        }
         req_buf[total_read] = '\0';
 
         char cmd[32];
@@ -748,8 +777,8 @@ int main(int argc, char **argv) {
         if (strcmp(cmd, "STATUS") == 0) {
             char status_resp[512];
             snprintf(status_resp, sizeof(status_resp),
-                     "STATUS OK model=%s t_max=%d base_pos=%d base_hash=0x%016lx base_generation=%d memory_state=%s vram_mb=1110 (weights_mb=850 kv_cache_mb=224 workspace_mb=36)\n",
-                     g_model_path, T_MAX, base_pos, g_base_hash, base_generation, memory_state);
+                     "STATUS OK model=%s model_sha256=%s t_max=%d base_pos=%d base_hash=0x%016lx base_generation=%d memory_state=%s vram_mb=1110 (weights_mb=850 kv_cache_mb=224 workspace_mb=36)\n",
+                     g_model_path, g_model_sha256, T_MAX, base_pos, g_base_hash, base_generation, memory_state);
             write(client_sock, status_resp, strlen(status_resp));
             close(client_sock);
             continue;
@@ -760,14 +789,21 @@ int main(int argc, char **argv) {
             int n_tokens = 0;
             int *tokens = (int*)malloc(sizeof(int) * 4096);
             char *tok = strtok(ptr, ", \t\n");
+            bool base_tok_invalid = false;
             while (tok && n_tokens < 4096) {
-                tokens[n_tokens++] = atoi(tok);
+                int tid = atoi(tok);
+                if (tid < 0 || tid >= VOCAB_SIZE) {
+                    base_tok_invalid = true;
+                    break;
+                }
+                tokens[n_tokens++] = tid;
                 tok = strtok(NULL, ", \t\n");
             }
 
-            // Validate capacity BEFORE changing state or modifying KV cache
-            if (n_tokens + 1 >= T_MAX) {
-                const char *err_resp = "ERR_CONTEXT_FULL\n";
+            // Validate capacity & token range BEFORE changing state or modifying KV cache
+            if (base_tok_invalid || n_tokens <= 0 || n_tokens + 1 >= T_MAX) {
+                const char *err_resp = base_tok_invalid ? "ERR_INVALID_TOKEN\n" :
+                                       (n_tokens <= 0)  ? "ERR_BAD_REQUEST\n" : "ERR_CONTEXT_FULL\n";
                 write(client_sock, err_resp, strlen(err_resp));
                 close(client_sock);
                 free(tokens);
@@ -830,6 +866,7 @@ int main(int argc, char **argv) {
             char *line_ptr = req_buf + strlen(cmd);
             int tok_count = 0;
             int *q_tokens = (int*)malloc(sizeof(int) * 4096);
+            bool tok_invalid = false;
 
             // format: QUERY <max_new_tokens> <id1,id2,...>
             char *token_str = strtok(line_ptr, " \t\n");
@@ -839,17 +876,34 @@ int main(int argc, char **argv) {
                 if (token_str) {
                     char *sub = strtok(token_str, ",");
                     while (sub && tok_count < 4096) {
-                        q_tokens[tok_count++] = atoi(sub);
+                        int tid = atoi(sub);
+                        if (tid < 0 || tid >= VOCAB_SIZE) {
+                            tok_invalid = true;
+                            break;
+                        }
+                        q_tokens[tok_count++] = tid;
                         sub = strtok(NULL, ",");
                     }
                 }
             }
 
-            // Boundary check: must have at least 1 token safety margin
-            if (cur_pos + tok_count + max_new_tokens + 1 > T_MAX) {
-                fprintf(stderr, "[qwen-server] ERR_CONTEXT_FULL: cur_pos(%d) + tok_count(%d) + max_new(%d) + 1 > T_MAX(%d)\n",
+            if (tok_invalid) {
+                const char *err_resp = "ERR_INVALID_TOKEN\n";
+                write(client_sock, err_resp, strlen(err_resp));
+                close(client_sock);
+                free(q_tokens);
+                continue;
+            }
+
+            // Strict bounds check: positive output budget, prompt length, and capacity limit
+            if (max_new_tokens <= 0 || max_new_tokens > T_MAX ||
+                tok_count <= 0 || tok_count >= T_MAX ||
+                cur_pos < 0 || cur_pos >= T_MAX ||
+                cur_pos + tok_count >= T_MAX ||
+                cur_pos + tok_count + max_new_tokens >= T_MAX) {
+                fprintf(stderr, "[qwen-server] Validation failed: cur_pos(%d) + tok_count(%d) + max_new(%d) >= T_MAX(%d)\n",
                         cur_pos, tok_count, max_new_tokens, T_MAX);
-                const char *err_resp = "ERR_CONTEXT_FULL\n";
+                const char *err_resp = (max_new_tokens <= 0 || tok_count <= 0) ? "ERR_BAD_REQUEST\n" : "ERR_CONTEXT_FULL\n";
                 write(client_sock, err_resp, strlen(err_resp));
                 close(client_sock);
                 free(q_tokens);

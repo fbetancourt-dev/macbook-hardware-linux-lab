@@ -103,6 +103,55 @@ Complete end-to-end multi-token prefill and autoregressive greedy token generati
 
 
 
+### 6. Production Local Daemon & CLI (`qwen_server` & `ask-qwen`)
+
+A high-performance persistent daemon resident in GT 750M VRAM paired with a transactional CLI client implementing persistent memory with crash consistency:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        ask-qwen (Client CLI)                           │
+│   • Profile (~/.config/local_llm/profile.md)                           │
+│   • Persistent Facts (~/.config/local_llm/facts.md)                    │
+│   • Manifest (~/.config/local_llm/memory_manifest.json)                │
+│   • Locking: facts.lock via fcntl.flock(LOCK_EX)                       │
+│   • Integrity: prompt_content_hash, model_sha256, tokenizer_hash       │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ Unix Domain Socket
+                                    │ (/run/user/1000/qwen.sock)
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      qwen_server (GPU Daemon)                          │
+│   • 100% Resident in GT 750M VRAM (1110 MB / 2048 MB allocated)        │
+│   • 28 Layers (Q4_0) + Output Norm (FP32) + LM Head (Q6_K)             │
+│   • Frozen Base KV Cache (SET_BASE prefilled once, zero repeat cost)   │
+│   • Streaming token generation directly to socket                      │
+│   • Lifecycle States: UNINITIALIZED ➔ REBUILDING ➔ READY               │
+│   • Guards: SO_RCVTIMEO (5s), RAW_QUERY guard, context overflow check  │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Protocol Specification:
+- **`PING`:** Returns `PONG\n` (liveness check).
+- **`STATUS`:** Returns formatted metadata string:
+  ```
+  STATUS OK model=<path> model_sha256=<hash> t_max=4096 base_pos=218 base_hash=0x6204c50c4b83d6ac base_generation=1 memory_state=READY vram_mb=1110 (weights_mb=850 kv_cache_mb=224 workspace_mb=36)
+  ```
+- **`SET_BASE <t1,t2,...>`:** Prefills system prompt tokens into KV cache starting at `pos=0` and freezes them as base context. Transitions state from `UNINITIALIZED` $\to$ `REBUILDING` $\to$ `READY`.
+- **`QUERY <max_new> <t1,t2,...>`:** Appends user tokens after `base_pos` without touching frozen base cache, evaluates user prompt, and streams generated tokens one by one until `<|im_end|>` or `max_new` limit.
+- **`RAW_QUERY <max_new> <t1,t2,...>`:** Evaluates prompt from `cur_pos=0` (only permitted when no base context is active).
+
+#### Transactional Guarantees & Memory Consistency:
+1. **2-Phase Commit:**
+   - **Phase 1 (Prepare):** Tokens prefilled into GPU VRAM. If GPU rejects (e.g. `ERR_CONTEXT_FULL`), disk state is untouched.
+   - **Phase 2 (Commit):** On GPU confirmation (`OK`), facts file is written atomically (`facts.md.tmp` $\to$ `fsync()` $\to$ `os.replace` $\to$ directory `fsync()`), followed by `memory_manifest.json`.
+2. **Deterministic Content Fingerprinting:**
+   - Instead of fragile mtime checks, `memory_manifest.json` tracks `prompt_content_hash = sha256(build_base_system_prompt())`. Any modification, addition, or deletion of memory immediately triggers automatic self-healing resynchronization.
+3. **Model & Binary Fingerprinting:**
+   - `model_sha256` of loaded GGUF and `tokenizer_hash` of `llama-tokenize` verified actively before inference to prevent running against stale weights.
+4. **Defensive Socket Accumulation & Bounds Validation:**
+   - Socket reads accumulated strictly until `\n` with a 5-second `SO_RCVTIMEO` timeout. Truncated inputs safely rejected with `ERR_TRUNCATED_REQUEST`.
+   - Token IDs and output token budgets strictly validated ($0 \le \text{tok} < \text{VOCAB\_SIZE}$, $0 < \text{max\_new} \le T_{\max}$, $\text{cur\_pos} + \text{tokens} + \text{max\_new} < T_{\max}$).
+
 ---
 
 ## 🔬 Key Engineering Insights
@@ -122,12 +171,18 @@ Complete end-to-end multi-token prefill and autoregressive greedy token generati
 ## 🛠️ Build & Run
 
 ```bash
-# Build both the 2-layer and 28-layer binaries:
+# Build the binaries:
 make clean && make
 
-# Run 28-layer full model validation:
-RUSTICL_ENABLE=nouveau ./test_28_layers_real
+# Launch persistent daemon in background:
+RUSTICL_ENABLE=nouveau ./qwen_server &
 
-# Run 2-layer isolated subsystem validation:
-RUSTICL_ENABLE=nouveau ./test_real_layers
+# Query via ask-qwen CLI:
+ask-qwen "Hola Qwen, que hardware tienes?"
+
+# Check status:
+ask-qwen --status
+
+# Store persistent fact in memory:
+ask-qwen --remember "Francisco es un ingeniero experto en Linux y robótica."
 ```
