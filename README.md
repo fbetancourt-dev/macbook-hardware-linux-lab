@@ -4,20 +4,50 @@ Low-level hardware reverse engineering, Linux kernel driver research, and high-p
 
 ---
 
-## 🎯 Mission & Philosophy
+## 🎯 Executive Engineering Overview
 
-This laboratory demystifies every piece of silicon, microcontroller, and firmware layer inside the 2014 MacBook Pro under modern Linux kernels (6.x/7.x) and modern Wayland desktop environments.
+This repository transforms the 2014 MacBook Pro into a dual-purpose engineering platform under modern Linux kernels (6.x/7.x) and Wayland desktop environments:
+1. **A Hardware Reverse Engineering & Driver Lab (`hardware/`):** Demystifying proprietary Apple ASICs, CPLDs, and PCIe peripherals (gmux, SMC, Broadcom FaceTime HD ISP, Cirrus HD audio).
+2. **A Scientific GPU Compute & Local AI Lab (`compute/`):** Extracting maximum performance from the discrete **NVIDIA GeForce GT 750M (384 Kepler Cores, 2 GB GDDR5)** using **Mesa Rusticl (OpenCL 3.0)** rather than proprietary dead-end CUDA or unstable Vulkan drivers.
 
-Rather than letting older hardware become obsolete, we focus on:
-1. **High-Performance GPU Computing without Proprietary CUDA:**
-   - Harnessing the **NVIDIA GeForce GT 750M (384 Kepler Cores, 2 GB GDDR5)** through modern **OpenCL 3.0 on Mesa Rusticl**.
-   - Massively parallel simulations in **MATLAB Simulink R2025b** via custom Level-2 C-MEX S-Functions (e.g. 1,024 parallel nonlinear inverted pendulums, 2D transient thermal field solvers).
-   - Local LLM inference acceleration with **`llama.cpp`** and **Continue** in VS Code at ~12.6 tokens/sec with rock-solid system stability.
-2. **Proprietary Hardware Reverse Engineering:**
-   - Mapping PCIe BARs, shared memory IPC ringbuffers, and bus protocols (PCIe, LPC, I2C, SPI, ACPI, USB).
-   - Documenting custom chips: **Apple gmux CPLD** (eDP display switching & PWM), **Apple SMC** (661 thermal/voltage/fan keys on LPC bus `0x300`), and the **Broadcom BCM1570 ISP** FaceTime HD camera.
-3. **Linux Kernel Driver Engineering:**
-   - Maintaining and validating drivers across kernel updates (`apple_gmux`, `applesmc`, `bcwc_pcie`, `bcm5974`, `snd_hda_intel`, `nouveau`).
+---
+
+## 🧭 Navigation Tracks: Choose Your Entry Point
+
+```
+ ┌────────────────────────────────────────────────────────────────────────────┐
+ │                  macbook-hardware-linux-lab Portal                         │
+ └──────────────────────┬──────────────────────────────┬──────────────────────┘
+                        │                              │
+         ┌──────────────┴──────────────┐┌──────────────┴──────────────┐
+         ▼                             ▼▼                             ▼
+   [HARDWARE LAB]               [COMPUTE LAB]                  [LOCAL AI]
+  Apple ASICs & Drivers       Simulink & Scientific        llama.cpp + Continue
+  • Camera BCM1570            • Cart-Pole 1,024 Ensemble   • 12.6 tokens/sec OpenCL
+  • Apple SMC Thermals        • 2D Thermal Anti-Windup     • Qwen2.5-Coder in VRAM
+  • gmux Display Switcher     • Simulink-OpenCL Bridge     • Systemd background daemon
+```
+
+### 🏎️ Track 1: High-Performance GPU Computing & Control ([`compute/`](compute/))
+* **[`compute/cartpole/`](compute/cartpole/):** Massive parallel ensemble simulation of **1,024 nonlinear inverted pendulums** computed on 384 GPU cores via C-MEX S-Function with Åström-Furuta energy swing-up and LQR control, plus an interactive 60 FPS real-time visualizer with keyboard steering.
+* **[`compute/thermal-control/`](compute/thermal-control/):** 2D transient heat diffusion PDE solver ($256 \times 256 = 65,536$ nodes) running on GPU coupled with multi-zone closed-loop PID control and anti-windup clamping in Simulink.
+* **[`compute/simulink-opencl-bridge/`](compute/simulink-opencl-bridge/):** Zero-allocation Level-2 C-MEX gateway architecture for streaming data between MATLAB Simulink and OpenCL kernels.
+* **[`compute/opencl-basics/`](compute/opencl-basics/):** Standalone C OpenCL kernels demonstrating $17.95\times$ speedup on N-body gravitation and 412M updates/sec 2D Laplacian stencils.
+
+### 🤖 Track 2: Local AI & LLM Acceleration on Legacy GPU ([`compute/local-llm/`](compute/local-llm/))
+* **[`compute/local-llm/`](compute/local-llm/):** Production deployment of `llama.cpp` using Mesa Rusticl OpenCL 3.0.
+  * **Model:** Qwen2.5-Coder 1.5B (986 MB in VRAM, ~809 MB RSS).
+  * **Throughput:** **11.5 – 12.6 tokens/sec** generation and **37.3 tokens/sec** prompt eval (~4.5× faster than Vulkan).
+  * **Integration:** OpenAI-compatible API on `127.0.0.1:8080` powering code autocompletion in **Continue (VS Code)**.
+  * **Stability:** Permanently eliminates the Mesa Vulkan NVK pushbuf crash bug (`OLLAMA_VULKAN=false`).
+
+### 🛠️ Track 3: Apple Silicon Reverse Engineering & Linux Drivers ([`hardware/`](hardware/))
+* **[`hardware/camera-bcm1570/`](hardware/camera-bcm1570/):** Complete reverse engineering of the Broadcom BCM1570 PCIe ISP FaceTime HD camera, DDR ringbuffer IPC protocol, and out-of-tree V4L2 driver (`bcwc_pcie`).
+* **[`hardware/smc-thermals/`](hardware/smc-thermals/):** Apple System Management Controller (SMC) protocol on LPC bus `0x300`, dual-fan tachometer PID control, and 661 hardware monitoring keys.
+* **[`hardware/display-gmux/`](hardware/display-gmux/):** Custom Lattice MachXO CPLD hardware architecture, embedded DisplayPort (eDP) lane multiplexing between Intel Iris Pro and NVIDIA GT 750M, and PWM backlight synthesis.
+* **[`hardware/input-trackpad/`](hardware/input-trackpad/):** Broadcom BCM5974 multi-touch controller USB protocol and evdev pressure event mapping.
+* **[`hardware/audio-cs4208/`](hardware/audio-cs4208/):** Cirrus Logic CS4208 HD Audio codec, multi-channel DAC/ADC pathing, and SPDIF optical routing.
+* **[`hardware/thunderbolt-pcie/`](hardware/thunderbolt-pcie/):** Intel DSL5520 Falcon Ridge 4C Thunderbolt 2 controller, dual 20 Gbps channels, and Linux PCIe hotplug.
 
 ---
 
@@ -59,19 +89,8 @@ Rather than letting older hardware become obsolete, we focus on:
 
 ---
 
-## 📂 Subsystems Directory
+## 📚 Central Documentation & Guides
 
-| Directory | Subsystem | Controller / Hardware | Scope & Implementations |
-| :--- | :--- | :--- | :--- |
-| [`subsystems/03-display-and-gmux/`](subsystems/03-display-and-gmux/) | **Dual GPU, gmux & OpenCL Compute** | Intel Iris Pro 5200 + Nvidia GT 750M + Apple gmux CPLD | **GPU Compute Lab:** 1,024-pendulum ensemble simulation (`simulink_inverted_pendulum`), 2D thermal anti-windup control (`simulink_multizone_thermal`), `llama.cpp` OpenCL inference daemon (`local-llm-opencl`), and `apple_gmux` backlight control. |
-| [`subsystems/02-smc-and-thermals/`](subsystems/02-smc-and-thermals/) | **System Management & Thermals** | Apple SMC (Renesas H8S/custom MCU on LPC bus `0x300`) | Hardware register protocol, dual-fan tachometer PID control, CPU/GPU thermal diode monitoring via `applesmc`. |
-| [`subsystems/01-camera-bcm1570/`](subsystems/01-camera-bcm1570/) | **FaceTime HD Camera** | Broadcom BCM1570 PCIe ISP (`14e4:1570`) + OmniVision CMOS | PCIe BAR layout reverse engineering, firmware loading protocol, and V4L2 kernel driver (`bcwc_pcie` / `facetimehd`). |
-| [`subsystems/04-input-trackpad/`](subsystems/04-input-trackpad/) | **Keyboard & Trackpad** | Broadcom BCM5974 Multitouch Controller (USB `05ac:0263`) | Multi-finger pressure gestures, SPI/USB packet decoding (`bcm5974`, `hid-apple`). |
-| [`subsystems/05-audio-codec/`](subsystems/05-audio-codec/) | **Audio Subsystem** | Cirrus Logic CS4208 + Intel Lynx Point HD Audio (`8086:8c20`) | Multi-channel DAC/ADC path routing, SPDIF optical output, and jack sensing (`snd_hda_intel`, `snd_hda_codec_cirrus`). |
-| [`subsystems/06-thunderbolt-pcie/`](subsystems/06-thunderbolt-pcie/) | **Thunderbolt 2** | Intel DSL5520 Falcon Ridge 4C (`8086:156d/156c`) | PCIe hotplug tunneling, domain controller power states, and security levels. |
-
----
-
-## 🛠️ Global Tools & Diagnostics
-
-* [`tools/macbook_system_audit.sh`](tools/macbook_system_audit.sh): Complete hardware topology, PCIe bus, SMC sensor and driver audit script.
+* [`docs/opencl-rusticl-setup.md`](docs/opencl-rusticl-setup.md): Complete guide to configuring Mesa Rusticl, environment variables, compiler flags, and avoiding Vulkan pushbuf collisions.
+* [`docs/MOTHERBOARD_TOPOLOGY.md`](docs/MOTHERBOARD_TOPOLOGY.md): In-depth hardware topology, bus mappings, and PCIe BAR assignments.
+* [`tools/macbook_system_audit.sh`](tools/macbook_system_audit.sh): Automated diagnostic script auditing system sensors, PCIe links, and kernel drivers.

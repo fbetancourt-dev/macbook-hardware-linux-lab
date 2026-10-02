@@ -39,7 +39,7 @@ Hardware acceleration and parallel scientific simulations running on the **384 C
 ## 🛠️ How to Compile and Run
 
 ```bash
-cd /home/fbetancourt/Gemini/macbook-hardware-linux-lab/subsystems/03-display-and-gmux/compute-kepler-opencl
+cd /home/fbetancourt/Gemini/macbook-hardware-linux-lab/compute/opencl-basics
 
 # Compile both benchmarks
 make

@@ -1,4 +1,4 @@
-# Subsystem: Dual GPU & Apple gmux (Display Multiplexer)
+# Hardware Subsystem: Dual GPU & Apple gmux (Display Multiplexer)
 
 The `MacBookPro11,3` incorporates a dual-GPU hybrid graphics architecture orchestrated by a proprietary hardware multiplexer: **Apple gmux**.
 
@@ -15,7 +15,7 @@ The `MacBookPro11,3` incorporates a dual-GPU hybrid graphics architecture orches
    * **Model:** NVIDIA GeForce GT 750M Mac Edition (Kepler architecture - GK107M core).
    * **PCI ID:** `10de:0fe9` at `01:00.0`.
    * **VRAM:** 2 GB GDDR5.
-   * **Kernel Driver:** `nouveau` (open-source) or proprietary `nvidia-driver`.
+   * **Kernel Driver:** `nouveau` (open-source DRM kernel driver).
 
 ---
 
@@ -36,13 +36,12 @@ The `MacBookPro11,3` incorporates a dual-GPU hybrid graphics architecture orches
 
 ---
 
-## 3. High-Performance GPU Compute Modules (Mesa Rusticl / OpenCL 3.0)
+## 3. High-Performance GPU Compute
 
-Due to NVIDIA deprecating the Kepler architecture in modern CUDA and the instability of experimental Mesa Vulkan (NVK), all accelerated compute workloads leverage **OpenCL 3.0 via Mesa Rusticl**:
+Accelerated scientific simulations and local AI workloads utilizing the GT 750M have been centralized in the top-level **[`compute/`](../../compute/)** directory:
 
-1. [`compute-kepler-opencl/`](compute-kepler-opencl/): Standalone C OpenCL 3.0 kernels for 2D Heat Diffusion and Gravitational N-body simulations.
-2. [`simulink_opencl_bridge/`](simulink_opencl_bridge/): Generic C-MEX Level-2 S-Function bridge connecting MATLAB Simulink directly to OpenCL compute queues.
-3. [`simulink_multizone_thermal/`](simulink_multizone_thermal/): 2D multizone thermal field finite-difference solver with anti-windup PID temperature regulation.
-4. [`simulink_inverted_pendulum/`](simulink_inverted_pendulum/): Real-time ensemble simulation of 1,024 nonlinear Cart-Pole pendulums with Åström-Furuta energy swing-up, LQR stabilization, and interactive keyboard steering GUI.
-5. [`local-llm-opencl/`](local-llm-opencl/): Production deployment of `llama.cpp` using Mesa Rusticl OpenCL 3.0, systemd daemon management, and Continue autocompletion integration.
-
+* [`compute/opencl-basics/`](../../compute/opencl-basics/): Standalone C OpenCL 3.0 kernels (2D Heat Diffusion and Gravitational N-body).
+* [`compute/simulink-opencl-bridge/`](../../compute/simulink-opencl-bridge/): Generic C-MEX Level-2 S-Function bridge for MATLAB Simulink.
+* [`compute/thermal-control/`](../../compute/thermal-control/): 2D multizone thermal field solver with anti-windup PID control.
+* [`compute/cartpole/`](../../compute/cartpole/): Real-time ensemble simulation of 1,024 nonlinear Cart-Pole pendulums and interactive steering GUI.
+* [`compute/local-llm/`](../../compute/local-llm/): Production deployment of `llama.cpp` using Mesa Rusticl OpenCL 3.0 for Continue.
