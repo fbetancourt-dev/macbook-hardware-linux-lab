@@ -13,6 +13,7 @@ test_28_layers_real
 test_gemv_q6_k
 test_full_model_logits
 generate_stream
+qwen_server
 
 
 # Python cache
