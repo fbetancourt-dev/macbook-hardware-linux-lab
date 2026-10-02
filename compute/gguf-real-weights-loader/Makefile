@@ -30,3 +30,6 @@ run: generate_stream
 .PHONY: all clean run
 
 
+
+qwen_server: qwen_server.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
