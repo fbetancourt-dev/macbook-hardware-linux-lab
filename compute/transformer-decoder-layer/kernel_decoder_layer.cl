@@ -158,7 +158,7 @@ __kernel void kernel_rope_and_kv_append(
     int tid = get_global_id(0); // 0 to 63
     if (tid >= 64) return;
 
-    float theta = (float)pos * native_powr(rope_base, -2.0f * (float)tid / (float)HEAD_DIM);
+    float theta = (float)pos * powr(rope_base, -2.0f * (float)tid / (float)HEAD_DIM);
     float cos_th = cos(theta);
     float sin_th = sin(theta);
 

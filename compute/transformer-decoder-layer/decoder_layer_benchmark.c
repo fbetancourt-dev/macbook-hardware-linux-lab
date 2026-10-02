@@ -208,7 +208,7 @@ void cpu_decoder_layer_pipeline(
             scores[t] = expf(scores[t] - max_s);
             sum_exp += scores[t];
         }
-        float inv_sum = 1.0f / (sum_exp + 1e-12f);
+        float inv_sum = 1.0f / sum_exp;
         for (int t = 0; t < seq_len; t++) {
             scores[t] *= inv_sum;
         }
@@ -272,17 +272,18 @@ static char* load_kernel_source(const char* filepath) {
     long size = ftell(fp);
     rewind(fp);
     char *src = (char*)malloc(size + 1);
-    fread(src, 1, size, fp);
+    size_t read_bytes = fread(src, 1, size, fp);
+    (void)read_bytes;
     src[size] = '\0';
     fclose(fp);
     return src;
 }
 
 int main(void) {
-    printf("===================================================================\n");
-    printf(" Complete Resident Transformer Decoder Layer on Kepler GT 750M     \n");
-    printf(" Full Qwen2.5-Coder-1.5B Layer Spec (D=1536, FFN=8960, GQA 12:2)   \n");
-    printf("===================================================================\n");
+    printf("========================================================================================\n");
+    printf(" Complete Resident Transformer Decoder Layer on Kepler GT 750M (E2E Telemetry)        \n");
+    printf(" Full Qwen2.5-Coder-1.5B Layer Spec (D=1536, FFN=8960, GQA 12:2, T_max=4096)           \n");
+    printf("========================================================================================\n");
 
     cl_uint num_platforms;
     clGetPlatformIDs(0, NULL, &num_platforms);
@@ -432,30 +433,34 @@ int main(void) {
     cl_mem d_k_cache = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sz_kv_cache, h_k_cache_cpu, &err); CHECK_CL(err, "d_k_cache");
     cl_mem d_v_cache = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sz_kv_cache, h_v_cache_cpu, &err); CHECK_CL(err, "d_v_cache");
 
+    // Resident Activation Arena with d_qkv reuse for attn_out (saves 6 KB and removes d_attn_out!)
     cl_mem d_state    = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * D_MODEL, NULL, &err); CHECK_CL(err, "d_state");
     cl_mem d_norm     = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * D_MODEL, NULL, &err); CHECK_CL(err, "d_norm");
     cl_mem d_qkv      = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * D_QKV, NULL, &err); CHECK_CL(err, "d_qkv");
     cl_mem d_scores   = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * N_HEADS_Q * T_MAX, NULL, &err); CHECK_CL(err, "d_scores");
     cl_mem d_partial  = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * N_HEADS_Q * MAX_SEGMENTS * HEAD_DIM, NULL, &err); CHECK_CL(err, "d_partial");
-    cl_mem d_attn_out = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * D_MODEL, NULL, &err); CHECK_CL(err, "d_attn_out");
     cl_mem d_h        = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * D_FFN, NULL, &err); CHECK_CL(err, "d_h");
 
     double total_weights_mb = (double)(sz_W_qkv + sz_W_o + sz_W_gate + sz_W_up + sz_W_down) / (1024.0 * 1024.0);
     double total_kv_mb = (double)(2 * sz_kv_cache) / (1024.0 * 1024.0);
     printf("Total Layer Weights in VRAM: %.2f MB\n", total_weights_mb);
     printf("Persistent KV Cache in VRAM: %.2f MB\n", total_kv_mb);
-    printf("Resident Activation Arena:   0.34 MB\n\n");
+    printf("Resident Activation Arena:   0.33 MB (with d_qkv buffer reuse)\n\n");
 
     int context_lens[] = {1, 32, 128, 512, 1024, 2048};
     int num_contexts = sizeof(context_lens) / sizeof(context_lens[0]);
 
-    printf("%-8s | %-12s | %-12s | %-10s | %-14s\n", "Tokens", "CPU (8T)", "GPU Kepler", "Speedup", "Max Abs Error");
-    printf("----------------------------------------------------------------------\n");
+    printf("%-8s | %-10s | %-11s | %-11s | %-9s | %-12s | %-10s\n",
+           "Tokens", "CPU (8T)", "GPU Compute", "Full E2E", "Speedup", "Max Abs Diff", "Cos Sim");
+    printf("----------------------------------------------------------------------------------------\n");
 
     for (int c = 0; c < num_contexts; c++) {
         int seq_len = context_lens[c];
         int pos = seq_len - 1;
 
+        // Reset KV Cache from CPU baseline snapshot
+        CHECK_CL(clEnqueueWriteBuffer(queue, d_k_cache, CL_TRUE, 0, sz_kv_cache, h_k_cache_cpu, 0, NULL, NULL), "reset k_cache");
+        CHECK_CL(clEnqueueWriteBuffer(queue, d_v_cache, CL_TRUE, 0, sz_kv_cache, h_v_cache_cpu, 0, NULL, NULL), "reset v_cache");
         CHECK_CL(clEnqueueWriteBuffer(queue, d_state, CL_TRUE, 0, sizeof(float) * D_MODEL, h_x, 0, NULL, NULL), "reset state");
 
         int d_model = D_MODEL;
@@ -528,16 +533,16 @@ int main(void) {
         clSetKernelArg(k_pv_combine, 4, sizeof(int), &t_max);
         clSetKernelArg(k_pv_combine, 5, sizeof(int), &num_segments);
 
-        // Stage 6b: Reduce Segments
+        // Stage 6b: Reduce Segments into d_qkv[0:1536] (buffer reuse!)
         size_t l_red = 128, g_red = 12 * 128;
         clSetKernelArg(k_pv_reduce, 0, sizeof(cl_mem), &d_partial);
-        clSetKernelArg(k_pv_reduce, 1, sizeof(cl_mem), &d_attn_out);
+        clSetKernelArg(k_pv_reduce, 1, sizeof(cl_mem), &d_qkv); // Reuse d_qkv as attn_out!
         clSetKernelArg(k_pv_reduce, 2, sizeof(int), &num_segments);
 
-        // Stage 7: Wo GEMV + Residual
+        // Stage 7: Wo GEMV + Residual (reading from d_qkv!)
         size_t l_wo = 128, g_wo = ((D_MODEL + 3) / 4) * 128;
         clSetKernelArg(k_wo_residual, 0, sizeof(cl_mem), &d_W_o);
-        clSetKernelArg(k_wo_residual, 1, sizeof(cl_mem), &d_attn_out);
+        clSetKernelArg(k_wo_residual, 1, sizeof(cl_mem), &d_qkv); // Reused buffer
         clSetKernelArg(k_wo_residual, 2, sizeof(cl_mem), &d_state);
         clSetKernelArg(k_wo_residual, 3, sizeof(int), &d_model);
 
@@ -565,7 +570,7 @@ int main(void) {
         clSetKernelArg(k_down_res, 3, sizeof(int), &d_model);
         clSetKernelArg(k_down_res, 4, sizeof(int), &d_ffn);
 
-        // Warmup execution
+        // Single Warmup execution
         clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, NULL);
         clEnqueueNDRangeKernel(queue, k_qkv_gemv, 1, NULL, &g_qkv, &l_qkv, 0, NULL, NULL);
         clEnqueueNDRangeKernel(queue, k_rope_kv, 1, NULL, &g_rope, &l_rope, 0, NULL, NULL);
@@ -581,23 +586,33 @@ int main(void) {
 
         CHECK_CL(clEnqueueReadBuffer(queue, d_state, CL_TRUE, 0, sizeof(float) * D_MODEL, h_y_gpu, 0, NULL, NULL), "read y_gpu");
 
+        // CPU Baseline execution
         cpu_decoder_layer_pipeline(
             h_x, h_gamma_attn, h_W_qkv, h_b_qkv, h_W_o,
             h_gamma_ffn, h_W_gate, h_W_up, h_W_down,
             h_k_cache_cpu, h_v_cache_cpu, pos, seq_len, h_y_cpu
         );
 
+        // Compute numerical accuracy metrics
         float max_diff = 0.0f;
+        double dot_prod = 0.0, norm_cpu = 0.0, norm_gpu = 0.0;
         for (int i = 0; i < D_MODEL; i++) {
             float diff = fabsf(h_y_gpu[i] - h_y_cpu[i]);
             if (diff > max_diff) max_diff = diff;
+            dot_prod += (double)h_y_gpu[i] * (double)h_y_cpu[i];
+            norm_cpu += (double)h_y_cpu[i] * (double)h_y_cpu[i];
+            norm_gpu += (double)h_y_gpu[i] * (double)h_y_gpu[i];
         }
+        double cos_sim = dot_prod / (sqrt(norm_cpu) * sqrt(norm_gpu));
 
         const int iters = 20;
-        double total_gpu_us = 0.0;
+        double total_gpu_compute_us = 0.0;
+        double total_gpu_e2e_us = 0.0;
         double total_cpu_us = 0.0;
 
         for (int it = 0; it < iters; it++) {
+            // Full E2E: Upload x -> Launch Kernels -> clFinish -> Download y
+            double t_e2e_0 = get_time_us();
             clEnqueueWriteBuffer(queue, d_state, CL_FALSE, 0, sizeof(float) * D_MODEL, h_x, 0, NULL, NULL);
 
             double t_gpu_0 = get_time_us();
@@ -614,7 +629,12 @@ int main(void) {
             clEnqueueNDRangeKernel(queue, k_down_res, 1, NULL, &g_down, &l_down, 0, NULL, NULL);
             clFinish(queue);
             double t_gpu_1 = get_time_us();
-            total_gpu_us += (t_gpu_1 - t_gpu_0);
+
+            clEnqueueReadBuffer(queue, d_state, CL_TRUE, 0, sizeof(float) * D_MODEL, h_y_gpu, 0, NULL, NULL);
+            double t_e2e_1 = get_time_us();
+
+            total_gpu_compute_us += (t_gpu_1 - t_gpu_0);
+            total_gpu_e2e_us     += (t_e2e_1 - t_e2e_0);
 
             double t_cpu_0 = get_time_us();
             cpu_decoder_layer_pipeline(
@@ -629,15 +649,16 @@ int main(void) {
         clReleaseMemObject(d_k_sub);
         clReleaseMemObject(d_v_sub);
 
-        double avg_gpu_ms = (total_gpu_us / (double)iters) / 1000.0;
-        double avg_cpu_ms = (total_cpu_us / (double)iters) / 1000.0;
-        double speedup = avg_cpu_ms / avg_gpu_ms;
+        double avg_gpu_compute_ms = (total_gpu_compute_us / (double)iters) / 1000.0;
+        double avg_gpu_e2e_ms     = (total_gpu_e2e_us / (double)iters) / 1000.0;
+        double avg_cpu_ms         = (total_cpu_us / (double)iters) / 1000.0;
+        double speedup            = avg_cpu_ms / avg_gpu_e2e_ms;
 
-        printf("T=%-6d | %8.2f ms | %8.2f ms | %8.2fx | %12.4e\n",
-               seq_len, avg_cpu_ms, avg_gpu_ms, speedup, max_diff);
+        printf("T=%-6d | %7.2f ms | %8.2f ms | %8.2f ms | %7.2fx | %12.4e | %8.6f\n",
+               seq_len, avg_cpu_ms, avg_gpu_compute_ms, avg_gpu_e2e_ms, speedup, max_diff, cos_sim);
     }
 
-    printf("----------------------------------------------------------------------\n");
+    printf("----------------------------------------------------------------------------------------\n");
     printf("Decoder Layer evaluation completed successfully.\n");
 
     clReleaseMemObject(d_W_qkv);
@@ -655,7 +676,6 @@ int main(void) {
     clReleaseMemObject(d_qkv);
     clReleaseMemObject(d_scores);
     clReleaseMemObject(d_partial);
-    clReleaseMemObject(d_attn_out);
     clReleaseMemObject(d_h);
 
     clReleaseKernel(k_rmsnorm);

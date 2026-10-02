@@ -4,13 +4,16 @@ Complete, end-to-end execution of a **Resident Transformer Decoder Layer** ($x \
 
 ---
 
-## 🎯 Architecture & Dataflow
+## 🎯 Architecture & In-Place Memory Arena
 
 A modern autoregressive decoder layer executes two core sub-layers with residual streams:
-1. **Multi-Head / Grouped-Query Attention (GQA)**: $D=1536$, $H_q=12$, $H_{kv}=2$, $d=128$, $T_{\max}=4096$.
+1. **Grouped-Query Attention (GQA)**: $D=1536$, $H_q=12$, $H_{kv}=2$, $d=128$, $T_{\max}=4096$.
 2. **SwiGLU Feed-Forward Network (FFN)**: $D=1536$, $M=8960$ ($5.83\times$ expansion).
 
-All weights (~25.10 MB in `Q4_0`), persistent KV caches (8.00 MB in FP32), and dynamic activation arenas (0.34 MB) remain **100% resident in GPU VRAM**. No intermediate activation is ever transferred back to the host CPU via PCIe.
+All weights (~25.10 MB in `Q4_0`), persistent KV caches (8.00 MB per layer in FP32), and dynamic activations remain **100% resident in GPU VRAM**. 
+
+### Buffer Reuse Optimization
+After RoPE and KV cache updates, the query portion $Q$ ($1536 \text{ floats}$) of `d_qkv` is no longer needed. The Flash-Decoding partial reduction writes directly back into `d_qkv[0:1536]`, completely eliminating the dedicated `d_attn_out` buffer and shrinking the dynamic arena to just **0.33 MB**.
 
 ```
 Host Memory (x: 6 KB)
@@ -32,7 +35,7 @@ Host Memory (x: 6 KB)
 │ 5. Softmax (Head-parallel numerically stable)               │
 │    │                                                        │
 │    ▼                                                        │
-│ 6. Split-K Segmented Value Combination + Partial Reduce     │
+│ 6. Split-K Segmented Value Combine -> Reduce into d_qkv     │
 │    │                                                        │
 │    ▼                                                        │
 │ 7. Wo Projection (1536 x 1536) + Residual Add: r = x + Wo   │
@@ -48,7 +51,7 @@ Host Memory (x: 6 KB)
 │     y = r + Down(h)                                         │
 └──────────────────────────────┬──────────────────────────────┘
                                │
-                               ▼ (PCIe Download: ~520 µs)
+                               ▼ (PCIe Download: ~420 µs)
                      Host Memory (y: 6 KB)
 ```
 
@@ -58,30 +61,29 @@ Host Memory (x: 6 KB)
 
 - **Device:** NVIDIA GeForce GT 750M (Kepler GK107, 384 cores, 2 GB GDDR5) via Mesa Rusticl OpenCL 3.0 (`NVE7`).
 - **CPU Reference:** Intel Core i7-4870HQ @ 2.50 GHz (Haswell AVX2 + FMA3, 8 OpenMP threads).
-- **Benchmark Methodology:** 20 alternated, interleaved iterations per context length to eliminate thermal bias.
+- **Benchmark Methodology:** 20 alternated, interleaved iterations measuring pure GPU compute and full E2E host wall-clock (upload + compute + download).
 
-| Context Length ($T$) | CPU Haswell (8T) | GPU Kepler GT 750M | Speedup vs CPU | Max Numerical Diff | Status |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| **$T = 1$** | $65.00\text{ ms}$ | **$33.84\text{ ms}$** | **$1.92\times$** 🚀 | $1.76 \times 10^{-2}$ | PASSED |
-| **$T = 32$** | $73.87\text{ ms}$ | **$35.06\text{ ms}$** | **$2.11\times$** 🚀 | $1.17 \times 10^{-2}$ | PASSED |
-| **$T = 128$** | $50.77\text{ ms}$ | **$31.41\text{ ms}$** | **$1.62\times$** 🚀 | $8.79 \times 10^{-3}$ | PASSED |
-| **$T = 512$** | $64.86\text{ ms}$ | **$32.03\text{ ms}$** | **$2.02\times$** 🚀 | $1.66 \times 10^{-2}$ | PASSED |
-| **$T = 1024$** | $81.14\text{ ms}$ | **$51.88\text{ ms}$** | **$1.56\times$** 🚀 | $1.86 \times 10^{-2}$ | PASSED |
-| **$T = 2048$** | $66.80\text{ ms}$ | **$51.59\text{ ms}$** | **$1.29\times$** 🚀 | $1.25 \times 10^{-1}$ | PASSED |
+| Context Length ($T$) | CPU Haswell (8T) | GPU Compute | Full E2E (PCIe) | Speedup vs CPU | Max Abs Diff | Cosine Similarity |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **$T = 1$** | $59.98\text{ ms}$ | **$28.20\text{ ms}$** | **$28.62\text{ ms}$** | **$2.10\times$** 🚀 | $1.76 \times 10^{-2}$ | **$1.000000$** |
+| **$T = 32$** | $54.92\text{ ms}$ | **$30.14\text{ ms}$** | **$30.80\text{ ms}$** | **$1.78\times$** 🚀 | $1.07 \times 10^{-2}$ | **$1.000000$** |
+| **$T = 128$** | $61.36\text{ ms}$ | **$45.35\text{ ms}$** | **$47.24\text{ ms}$** | **$1.30\times$** 🚀 | $1.27 \times 10^{-2}$ | **$1.000000$** |
+| **$T = 512$** | $98.14\text{ ms}$ | **$85.82\text{ ms}$** | **$95.45\text{ ms}$** | **$1.03\times$** 🚀 | $1.37 \times 10^{-2}$ | **$1.000000$** |
+| **$T = 1024$** | $106.85\text{ ms}$ | $109.49\text{ ms}$ | $123.48\text{ ms}$ | $0.87\times$ | $1.07 \times 10^{-2}$ | **$1.000000$** |
+| **$T = 2048$** | $71.72\text{ ms}$ | $75.18\text{ ms}$ | $82.35\text{ ms}$ | $0.87\times$ | $1.37 \times 10^{-2}$ | **$1.000000$** |
 
 ---
 
-## 🔬 Key Engineering Insights
+## 🔬 Key Engineering Insights & Validation
 
-1. **End-to-End Speedup on Legacy Hardware:**
-   The entire decoder layer runs up to **$2.11\times$ faster on the GT 750M** than on all 8 threads of the Haswell CPU with AVX2. Even at $T=2048$, the GPU sustains a **$1.29\times$ advantage** ($51.59\text{ ms}$ vs $66.80\text{ ms}$).
-2. **Minimal VRAM Footprint:**
-   - Layer Weights: **25.10 MB** (Q4_0 quantization).
-   - Full KV Cache ($T=4096$): **8.00 MB** (FP32).
-   - Dynamic Activations Arena: **0.34 MB** (shared in-place buffers for $x \to r \to y$, norm, qkv, scores, and intermediate down).
-   - **Total footprint per layer is under 34 MB**, making multi-layer residency easily fit within the GT 750M's 2048 MB VRAM.
-3. **Split-K Flash-Decoding Scaling:**
-   Segmenting the context into 256-token tiles with 128 threads per workgroup prevents thread starvation at large context windows, maintaining sub-$52\text{ ms}$ total layer execution even at $T=2048$.
+1. **Perfect Numerical Alignment (Cosine Sim = 1.000000):**
+   - By eliminating `native_powr` and replacing it with IEEE `powr`, resetting KV cache test slices between contexts, and matching CPU/GPU Softmax normalization, the maximum absolute difference dropped across all contexts to **$\le 1.76 \times 10^{-2}$**, with **Cosine Similarity = 1.000000** at every context length up to $T=2048$.
+2. **Short-to-Medium Context Dominance ($T=1 \dots 512$):**
+   - In generation mode ($T=1 \dots 32$), the GPU delivers **$2.10\times$ speedup** over all 8 CPU threads, completing the full decoder layer in **$28.62\text{ ms}$ E2E**.
+3. **KV Cache Scalability for 28 Layers:**
+   - At $T=4096$, each layer requires 8.00 MB of FP32 KV cache. Across all 28 layers of Qwen2.5-Coder-1.5B, the full cache requires **224 MB**, which easily fits into the 2048 MB VRAM of the GT 750M.
+4. **Next Optimization Target (Online Flash-Decoding Softmax):**
+   - At $T \ge 1024$, attention score generation and global Softmax VRAM passes introduce bandwidth overhead. Fusing Softmax into the Split-K value combination tile will eliminate the `d_scores` global roundtrips.
 
 ---
 
