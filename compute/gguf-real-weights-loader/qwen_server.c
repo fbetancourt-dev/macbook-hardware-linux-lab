@@ -721,10 +721,19 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        // Read request line
-        ssize_t n_read = read(client_sock, req_buf, sizeof(req_buf) - 1);
-        if (n_read <= 0) { close(client_sock); continue; }
-        req_buf[n_read] = '\0';
+        // Read request line until '\n'
+        size_t total_read = 0;
+        while (total_read < sizeof(req_buf) - 1) {
+            ssize_t n = read(client_sock, req_buf + total_read, 1);
+            if (n <= 0) break;
+            if (req_buf[total_read] == '\n') {
+                req_buf[total_read] = '\0';
+                break;
+            }
+            total_read++;
+        }
+        if (total_read == 0) { close(client_sock); continue; }
+        req_buf[total_read] = '\0';
 
         char cmd[32];
         if (sscanf(req_buf, "%31s", cmd) != 1) { close(client_sock); continue; }
@@ -747,8 +756,6 @@ int main(int argc, char **argv) {
         }
 
         if (strcmp(cmd, "SET_BASE") == 0) {
-            g_is_busy = 1;
-            memory_state = "REBUILDING";
             char *ptr = req_buf + 8;
             int n_tokens = 0;
             int *tokens = (int*)malloc(sizeof(int) * 4096);
@@ -758,15 +765,17 @@ int main(int argc, char **argv) {
                 tok = strtok(NULL, ", \t\n");
             }
 
+            // Validate capacity BEFORE changing state or modifying KV cache
             if (n_tokens + 1 >= T_MAX) {
                 const char *err_resp = "ERR_CONTEXT_FULL\n";
                 write(client_sock, err_resp, strlen(err_resp));
                 close(client_sock);
                 free(tokens);
-                memory_state = "ERROR";
-                g_is_busy = 0;
                 continue;
             }
+
+            g_is_busy = 1;
+            memory_state = "REBUILDING";
 
             fprintf(stderr, "[qwen-server] Freezing %d base system tokens into KV cache (generation %d)...\n", n_tokens, base_generation + 1);
             uint64_t hash = 14695981039346656037ULL;
@@ -800,6 +809,15 @@ int main(int argc, char **argv) {
 
         if (strcmp(cmd, "QUERY") == 0 || strcmp(cmd, "RAW_QUERY") == 0) {
             bool is_raw = (strcmp(cmd, "RAW_QUERY") == 0);
+
+            // Protect frozen base KV cache from RAW_QUERY
+            if (is_raw && base_pos > 0 && strcmp(memory_state, "READY") == 0) {
+                const char *err_raw = "ERR_RAW_NOT_ALLOWED_WHEN_BASE_ACTIVE\n";
+                write(client_sock, err_raw, strlen(err_raw));
+                close(client_sock);
+                continue;
+            }
+
             if (!is_raw && strcmp(memory_state, "READY") != 0) {
                 const char *err_not_ready = "ERR_NOT_READY\n";
                 write(client_sock, err_not_ready, strlen(err_not_ready));

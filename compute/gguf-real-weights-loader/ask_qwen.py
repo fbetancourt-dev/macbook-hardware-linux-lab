@@ -109,7 +109,8 @@ def get_tokenizer_hash():
         return "not_found"
     h = hashlib.sha256()
     with open(TOKENIZER_BIN, "rb") as f:
-        h.update(f.read(65536))
+        while chunk := f.read(1048576):
+            h.update(chunk)
     return h.hexdigest()[:16]
 
 def get_chat_template_hash():
@@ -144,33 +145,40 @@ def write_manifest(gen: int, b_hash: str, b_pos: int, last_fact: str = ""):
         os.close(dir_fd)
 
 def sync_base_memory(verbose=False):
-    s = connect_socket()
-    if not s:
-        print("❌ Error: qwen_server daemon no está activo.", file=sys.stderr)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    lock_fd = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        s = connect_socket()
+        if not s:
+            print("❌ Error: qwen_server daemon no está activo.", file=sys.stderr)
+            return False
+
+        sys_text = build_base_system_prompt()
+        tokens = tokenize(sys_text)
+        if verbose:
+            print(f"[*] Prefillando {len(tokens)} tokens de memoria base en GPU VRAM...", file=sys.stderr)
+
+        req = f"SET_BASE {','.join(map(str, tokens))}\n"
+        s.sendall(req.encode())
+        resp = s.recv(1024).decode('utf-8', errors='replace').strip()
+        s.close()
+        if verbose:
+            print(f"[*] Servidor: {resp}", file=sys.stderr)
+
+        if "OK" in resp:
+            m_pos = re.search(r'base_pos=(\d+)', resp)
+            m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
+            m_gen = re.search(r'base_generation=(\d+)', resp)
+            b_pos = int(m_pos.group(1)) if m_pos else len(tokens)
+            b_hash = m_hash.group(1) if m_hash else "0x0"
+            b_gen = int(m_gen.group(1)) if m_gen else 1
+            write_manifest(b_gen, b_hash, b_pos)
+            return True
         return False
-
-    sys_text = build_base_system_prompt()
-    tokens = tokenize(sys_text)
-    if verbose:
-        print(f"[*] Prefillando {len(tokens)} tokens de memoria base en GPU VRAM...", file=sys.stderr)
-
-    req = f"SET_BASE {','.join(map(str, tokens))}\n"
-    s.sendall(req.encode())
-    resp = s.recv(1024).decode('utf-8', errors='replace').strip()
-    s.close()
-    if verbose:
-        print(f"[*] Servidor: {resp}", file=sys.stderr)
-
-    if "OK" in resp:
-        m_pos = re.search(r'base_pos=(\d+)', resp)
-        m_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', resp)
-        m_gen = re.search(r'base_generation=(\d+)', resp)
-        b_pos = int(m_pos.group(1)) if m_pos else len(tokens)
-        b_hash = m_hash.group(1) if m_hash else "0x0"
-        b_gen = int(m_gen.group(1)) if m_gen else 1
-        write_manifest(b_gen, b_hash, b_pos)
-        return True
-    return False
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 def remember_fact(fact: str):
     os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -302,11 +310,37 @@ def main():
         print("   Inicia el servidor con: RUSTICL_ENABLE=nouveau ./qwen_server", file=sys.stderr)
         return 1
 
-    # Check if base memory is loaded
+    # Check if base memory is loaded and matches disk manifest
     st = get_status(s)
     s.close()
-    if "base_pos=0" in st or "memory_state=UNINITIALIZED" in st or "memory_state=REBUILDING" in st:
-        print("[!] Memoria en VRAM no inicializada (estado REBUILDING). Reconstruyendo KV cache en GPU VRAM desde disco...", file=sys.stderr)
+
+    need_rebuild = False
+    m_server_hash = re.search(r'base_hash=(0x[0-9a-fA-F]+)', st)
+    server_hash = m_server_hash.group(1).lower() if m_server_hash else ""
+
+    if "base_pos=0" in st or "memory_state=READY" not in st:
+        need_rebuild = True
+    elif not os.path.exists(MANIFEST_FILE):
+        need_rebuild = True
+    else:
+        try:
+            with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
+                man = json.load(f)
+            manifest_hash = str(man.get("base_hash", "")).lower()
+            if not server_hash or server_hash != manifest_hash:
+                need_rebuild = True
+            else:
+                # Also verify if facts or profile were edited on disk after manifest
+                man_mtime = os.path.getmtime(MANIFEST_FILE)
+                if os.path.exists(FACTS_FILE) and os.path.getmtime(FACTS_FILE) > man_mtime:
+                    need_rebuild = True
+                if os.path.exists(PROFILE_FILE) and os.path.getmtime(PROFILE_FILE) > man_mtime:
+                    need_rebuild = True
+        except Exception:
+            need_rebuild = True
+
+    if need_rebuild:
+        print("[!] Memoria en VRAM no sincronizada o no inicializada. Reconstruyendo KV cache en GPU VRAM desde disco...", file=sys.stderr)
         ok = sync_base_memory(verbose=True)
         if not ok:
             print("❌ Error reconstruyendo memoria base en VRAM.", file=sys.stderr)
