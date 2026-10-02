@@ -1,6 +1,6 @@
 # MacBook Pro Linux Hardware Engineering & GPU Compute Lab
 
-Low-level hardware reverse engineering, Linux kernel driver research, and high-performance GPU computing on legacy silicon (**NVIDIA Kepler OpenCL 3.0 via Mesa Rusticl, MATLAB Simulink C-MEX, and local LLM acceleration**) for the **Apple MacBook Pro (Retina, 15-inch, Mid 2014 - `MacBookPro11,3`)**.
+Low-level hardware reverse engineering, Linux kernel driver research, and high-performance GPU computing on legacy silicon (**NVIDIA Kepler OpenCL 3.0 via Mesa Rusticl, MATLAB Simulink C-MEX, and Intel Haswell AVX2 local LLM acceleration**) for the **Apple MacBook Pro (Retina, 15-inch, Mid 2014 - `MacBookPro11,3`)**.
 
 ---
 
@@ -8,7 +8,7 @@ Low-level hardware reverse engineering, Linux kernel driver research, and high-p
 
 This repository transforms the 2014 MacBook Pro into a dual-purpose engineering platform under modern Linux kernels (6.x/7.x) and Wayland desktop environments:
 1. **A Hardware Reverse Engineering & Driver Lab ([`hardware/`](hardware/)):** Demystifying proprietary Apple ASICs, CPLDs, and PCIe peripherals (gmux, SMC, Broadcom FaceTime HD ISP, Cirrus HD audio).
-2. **A Scientific GPU Compute & Local AI Lab ([`compute/`](compute/)):** Extracting maximum performance from the discrete **NVIDIA GeForce GT 750M (384 Kepler Cores, 2 GB GDDR5)** using **Mesa Rusticl (OpenCL 3.0)** rather than proprietary dead-end CUDA or experimental Vulkan drivers.
+2. **A Scientific GPU Compute & Local AI Lab ([`compute/`](compute/)):** Extracting maximum performance from the discrete **NVIDIA GeForce GT 750M (384 Kepler Cores, 2 GB GDDR5)** using **Mesa Rusticl (OpenCL 3.0)** for single-precision scientific computing, alongside **Intel Haswell AVX2 vector SIMD** for sub-second local LLM coding autocompletion in VS Code.
 
 ---
 
@@ -23,8 +23,8 @@ This repository transforms the 2014 MacBook Pro into a dual-purpose engineering 
          ▼                             ▼▼                             ▼
    [HARDWARE LAB]               [COMPUTE LAB]                  [LOCAL AI]
   Apple ASICs & Drivers       Simulink & Scientific        llama.cpp + Continue
-  • Camera BCM1570            • Cart-Pole 1,024 Ensemble   • 12.6 tokens/sec OpenCL
-  • Apple SMC Thermals        • 2D Thermal Anti-Windup     • Qwen2.5-Coder in VRAM
+  • Camera BCM1570            • Cart-Pole 1,024 Ensemble   • 12.6 tokens/sec AVX2
+  • Apple SMC Thermals        • 2D Thermal Anti-Windup     • DeepSeek & Qwen Coder
   • gmux Display Switcher     • Simulink-OpenCL Bridge     • Systemd background daemon
 ```
 
@@ -34,12 +34,12 @@ This repository transforms the 2014 MacBook Pro into a dual-purpose engineering 
 * **[`compute/simulink-opencl-bridge/`](compute/simulink-opencl-bridge/):** Zero-allocation Level-2 C-MEX gateway architecture for streaming data between MATLAB Simulink and OpenCL kernels.
 * **[`compute/opencl-basics/`](compute/opencl-basics/):** Standalone C OpenCL kernels demonstrating $17.95\times$ speedup on N-body gravitation and 412M updates/sec 2D Laplacian stencils.
 
-### 🤖 Track 2: Local AI & LLM Acceleration on Legacy GPU ([`compute/local-llm/`](compute/local-llm/))
-* **[`compute/local-llm/`](compute/local-llm/):** Production deployment of `llama.cpp` using Mesa Rusticl OpenCL 3.0.
-  * **Model:** Qwen2.5-Coder 1.5B (986 MB in VRAM, ~809 MB resident memory footprint).
-  * **Throughput:** **11.5 – 12.6 tokens/sec** generation and **37.3 tokens/sec** prompt eval (~4.5× faster than CPU Ollama).
+### 🤖 Track 2: Local AI & Coding Assistance on Haswell AVX2 ([`compute/local-llm/`](compute/local-llm/))
+* **[`compute/local-llm/`](compute/local-llm/):** Production deployment of `llama.cpp` and Ollama for developer pair programming.
+  * **Architectural Hardware Boundary:** Proves empirically why LLM quantization kernels (`Q4_K`, `Q5_K`) execute on CPU AVX2 rather than legacy Kepler GPUs due to the silicon-level absence of native `cl_khr_fp16` in GK107.
+  * **Models & Benchmarks:** Qwen2.5-Coder 1.5B (11.5–12.6 t/s) and DeepSeek-Coder (1.3B fast autocomplete at 9.7 t/s vs 6.7B deliberate chat).
   * **Integration:** OpenAI-compatible API on `127.0.0.1:8080` powering code autocompletion in **Continue (VS Code)**.
-  * **Stability:** Mitigates Nouveau FIFO pushbuf stalls by isolating compute to Mesa Rusticl (`OLLAMA_VULKAN=false`); zero crashes observed during continuous completion sessions.
+  * **Stability:** Zero desktop crashes by isolating compute from experimental Vulkan NVK paths (`OLLAMA_VULKAN=false`).
 
 ### 🛠️ Track 3: Proprietary Apple Hardware Reverse Engineering & Linux Drivers ([`hardware/`](hardware/))
 * **[`hardware/camera-bcm1570/`](hardware/camera-bcm1570/):** Complete reverse engineering of the Broadcom BCM1570 PCIe ISP FaceTime HD camera, DDR ringbuffer IPC protocol, and out-of-tree V4L2 driver (`bcwc_pcie`).
