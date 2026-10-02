@@ -1,21 +1,27 @@
-# MacBook Pro Hardware & Linux Driver Engineering Lab
+# MacBook Pro Linux Hardware Engineering & GPU Compute Lab
 
-Technical research, low-level reverse engineering, hardware architecture documentation, and Linux kernel driver development for the **Apple MacBook Pro (Retina, 15-inch, Mid 2014 - `MacBookPro11,3`)**.
+Low-level hardware reverse engineering, Linux kernel driver research, and high-performance GPU computing on legacy silicon (**NVIDIA Kepler OpenCL 3.0 via Mesa Rusticl, MATLAB Simulink C-MEX, and local LLM acceleration**) for the **Apple MacBook Pro (Retina, 15-inch, Mid 2014 - `MacBookPro11,3`)**.
 
 ---
 
 ## 🎯 Mission & Philosophy
 
-The goal of this project is to demystify every piece of silicon, microcontroller, and firmware layer inside the laptop down to the Linux kernel drivers and user-space APIs. 
+This laboratory demystifies every piece of silicon, microcontroller, and firmware layer inside the 2014 MacBook Pro under modern Linux kernels (6.x/7.x) and modern Wayland desktop environments.
 
-By understanding the exact hardware topologies, PCIe BAR mappings, shared memory IPC ringbuffers, and bus protocols (PCIe, LPC, I2C, SPI, ACPI, USB), we can:
-1. **Master Linux driver development** through real, complex proprietary hardware.
-2. **Revitalize and maintain hardware** on modern Linux kernels (6.x & 7.x).
-3. **Build ultra-robust user-space applications** that interact directly and cleanly with system APIs, kernel interfaces, and hardware registers.
+Rather than letting older hardware become obsolete, we focus on:
+1. **High-Performance GPU Computing without Proprietary CUDA:**
+   - Harnessing the **NVIDIA GeForce GT 750M (384 Kepler Cores, 2 GB GDDR5)** through modern **OpenCL 3.0 on Mesa Rusticl**.
+   - Massively parallel simulations in **MATLAB Simulink R2025b** via custom Level-2 C-MEX S-Functions (e.g. 1,024 parallel nonlinear inverted pendulums, 2D transient thermal field solvers).
+   - Local LLM inference acceleration with **`llama.cpp`** and **Continue** in VS Code at ~12.6 tokens/sec with rock-solid system stability.
+2. **Proprietary Hardware Reverse Engineering:**
+   - Mapping PCIe BARs, shared memory IPC ringbuffers, and bus protocols (PCIe, LPC, I2C, SPI, ACPI, USB).
+   - Documenting custom chips: **Apple gmux CPLD** (eDP display switching & PWM), **Apple SMC** (661 thermal/voltage/fan keys on LPC bus `0x300`), and the **Broadcom BCM1570 ISP** FaceTime HD camera.
+3. **Linux Kernel Driver Engineering:**
+   - Maintaining and validating drivers across kernel updates (`apple_gmux`, `applesmc`, `bcwc_pcie`, `bcm5974`, `snd_hda_intel`, `nouveau`).
 
 ---
 
-## 💻 Hardware Profile (`MacBookPro11,3`)
+## 💻 Hardware Architecture Profile (`MacBookPro11,3`)
 
 ```
                         ┌──────────────────────────────────────────────┐
@@ -29,6 +35,7 @@ By understanding the exact hardware topologies, PCIe BAR mappings, shared memory
                  ┌─────────────────────────────┐ ┌──────────────────────────────────────────┐
                  │ NVIDIA GeForce GT 750M Mac  │ │ Intel 8-Series HM87 Lynx Point PCH       │
                  │ [10de:0fe9] (2 GB GDDR5)    │ │ [8086:8c4b]                              │
+                 │ OpenCL 3.0 (Mesa Rusticl)   │ │                                          │
                  └──────────────┬──────────────┘ └──────┬────────────┬────────────┬─────────┘
                                 │                       │            │            │
                                 ▼                       │            │            │
@@ -54,14 +61,14 @@ By understanding the exact hardware topologies, PCIe BAR mappings, shared memory
 
 ## 📂 Subsystems Directory
 
-| Directory | Subsystem | Controller / Hardware | Linux Driver / Subsystem |
+| Directory | Subsystem | Controller / Hardware | Scope & Implementations |
 | :--- | :--- | :--- | :--- |
-| [`subsystems/01-camera-bcm1570/`](subsystems/01-camera-bcm1570/) | **FaceTime HD Camera** | Broadcom BCM1570 PCIe ISP (`14e4:1570`) + OmniVision CMOS | `bcwc_pcie` / `facetimehd` (`/dev/video0`) |
-| [`subsystems/02-smc-and-thermals/`](subsystems/02-smc-and-thermals/) | **System Management** | Apple SMC (Renesas H8S/custom MCU on LPC bus `0x300`) | `applesmc` (`/sys/devices/platform/applesmc.768`) |
-| [`subsystems/03-display-and-gmux/`](subsystems/03-display-and-gmux/) | **Dual GPU & Display** | Intel Iris Pro 5200 + Nvidia GT 750M + Apple gmux CPLD | `i915`, `nouveau` / `nvidia`, `apple_gmux` |
-| [`subsystems/04-input-trackpad/`](subsystems/04-input-trackpad/) | **Keyboard & Trackpad** | Broadcom BCM5974 Multitouch Controller (USB `05ac:0263`) | `bcm5974`, `hid-apple` (`evdev`) |
-| [`subsystems/05-audio-codec/`](subsystems/05-audio-codec/) | **Audio Subsystem** | Cirrus Logic CS4208 + Intel Lynx Point HD Audio (`8086:8c20`) | `snd_hda_intel`, `snd_hda_codec_cirrus` |
-| [`subsystems/06-thunderbolt-pcie/`](subsystems/06-thunderbolt-pcie/) | **Thunderbolt 2** | Intel DSL5520 Falcon Ridge 4C (`8086:156d/156c`) | `thunderbolt`, PCIe hotplug |
+| [`subsystems/03-display-and-gmux/`](subsystems/03-display-and-gmux/) | **Dual GPU, gmux & OpenCL Compute** | Intel Iris Pro 5200 + Nvidia GT 750M + Apple gmux CPLD | **GPU Compute Lab:** 1,024-pendulum ensemble simulation (`simulink_inverted_pendulum`), 2D thermal anti-windup control (`simulink_multizone_thermal`), `llama.cpp` OpenCL inference daemon (`local-llm-opencl`), and `apple_gmux` backlight control. |
+| [`subsystems/02-smc-and-thermals/`](subsystems/02-smc-and-thermals/) | **System Management & Thermals** | Apple SMC (Renesas H8S/custom MCU on LPC bus `0x300`) | Hardware register protocol, dual-fan tachometer PID control, CPU/GPU thermal diode monitoring via `applesmc`. |
+| [`subsystems/01-camera-bcm1570/`](subsystems/01-camera-bcm1570/) | **FaceTime HD Camera** | Broadcom BCM1570 PCIe ISP (`14e4:1570`) + OmniVision CMOS | PCIe BAR layout reverse engineering, firmware loading protocol, and V4L2 kernel driver (`bcwc_pcie` / `facetimehd`). |
+| [`subsystems/04-input-trackpad/`](subsystems/04-input-trackpad/) | **Keyboard & Trackpad** | Broadcom BCM5974 Multitouch Controller (USB `05ac:0263`) | Multi-finger pressure gestures, SPI/USB packet decoding (`bcm5974`, `hid-apple`). |
+| [`subsystems/05-audio-codec/`](subsystems/05-audio-codec/) | **Audio Subsystem** | Cirrus Logic CS4208 + Intel Lynx Point HD Audio (`8086:8c20`) | Multi-channel DAC/ADC path routing, SPDIF optical output, and jack sensing (`snd_hda_intel`, `snd_hda_codec_cirrus`). |
+| [`subsystems/06-thunderbolt-pcie/`](subsystems/06-thunderbolt-pcie/) | **Thunderbolt 2** | Intel DSL5520 Falcon Ridge 4C (`8086:156d/156c`) | PCIe hotplug tunneling, domain controller power states, and security levels. |
 
 ---
 
