@@ -1,6 +1,6 @@
 CC = gcc
-CFLAGS = -O3 -Wall -Wextra
-LDFLAGS = -lOpenCL -lm
+CFLAGS = -O3 -Wall -Wextra -fopenmp -mavx2
+LDFLAGS = -lOpenCL -lm -fopenmp
 
 TARGETS = heat_equation_2d nbody_simulation
 
