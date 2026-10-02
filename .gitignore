@@ -1,0 +1,17 @@
+# MATLAB & Simulink temporary files
+*.slxc
+slprj/
+*.asv
+*.bin
+
+# Build artifacts
+build/
+*.o
+
+# Python cache
+__pycache__/
+*.pyc
+
+# System / OS
+.DS_Store
+Thumbs.db

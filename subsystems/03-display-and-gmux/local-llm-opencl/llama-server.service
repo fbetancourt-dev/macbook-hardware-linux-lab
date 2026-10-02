@@ -1,0 +1,13 @@
+[Unit]
+Description=llama.cpp OpenCL Server for Continue
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/fbetancourt/Applications/llama.cpp/start_llama_server.sh
+Restart=always
+RestartSec=3
+Environment="PATH=/home/fbetancourt/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+[Install]
+WantedBy=default.target
