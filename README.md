@@ -7,8 +7,8 @@ Low-level hardware reverse engineering, Linux kernel driver research, and high-p
 ## 🎯 Executive Engineering Overview
 
 This repository transforms the 2014 MacBook Pro into a dual-purpose engineering platform under modern Linux kernels (6.x/7.x) and Wayland desktop environments:
-1. **A Hardware Reverse Engineering & Driver Lab (`hardware/`):** Demystifying proprietary Apple ASICs, CPLDs, and PCIe peripherals (gmux, SMC, Broadcom FaceTime HD ISP, Cirrus HD audio).
-2. **A Scientific GPU Compute & Local AI Lab (`compute/`):** Extracting maximum performance from the discrete **NVIDIA GeForce GT 750M (384 Kepler Cores, 2 GB GDDR5)** using **Mesa Rusticl (OpenCL 3.0)** rather than proprietary dead-end CUDA or unstable Vulkan drivers.
+1. **A Hardware Reverse Engineering & Driver Lab ([`hardware/`](hardware/)):** Demystifying proprietary Apple ASICs, CPLDs, and PCIe peripherals (gmux, SMC, Broadcom FaceTime HD ISP, Cirrus HD audio).
+2. **A Scientific GPU Compute & Local AI Lab ([`compute/`](compute/)):** Extracting maximum performance from the discrete **NVIDIA GeForce GT 750M (384 Kepler Cores, 2 GB GDDR5)** using **Mesa Rusticl (OpenCL 3.0)** rather than proprietary dead-end CUDA or experimental Vulkan drivers.
 
 ---
 
@@ -36,12 +36,12 @@ This repository transforms the 2014 MacBook Pro into a dual-purpose engineering 
 
 ### 🤖 Track 2: Local AI & LLM Acceleration on Legacy GPU ([`compute/local-llm/`](compute/local-llm/))
 * **[`compute/local-llm/`](compute/local-llm/):** Production deployment of `llama.cpp` using Mesa Rusticl OpenCL 3.0.
-  * **Model:** Qwen2.5-Coder 1.5B (986 MB in VRAM, ~809 MB RSS).
-  * **Throughput:** **11.5 – 12.6 tokens/sec** generation and **37.3 tokens/sec** prompt eval (~4.5× faster than Vulkan).
+  * **Model:** Qwen2.5-Coder 1.5B (986 MB in VRAM, ~809 MB resident memory footprint).
+  * **Throughput:** **11.5 – 12.6 tokens/sec** generation and **37.3 tokens/sec** prompt eval (~4.5× faster than CPU Ollama).
   * **Integration:** OpenAI-compatible API on `127.0.0.1:8080` powering code autocompletion in **Continue (VS Code)**.
-  * **Stability:** Permanently eliminates the Mesa Vulkan NVK pushbuf crash bug (`OLLAMA_VULKAN=false`).
+  * **Stability:** Mitigates Nouveau FIFO pushbuf stalls by isolating compute to Mesa Rusticl (`OLLAMA_VULKAN=false`); zero crashes observed during continuous completion sessions.
 
-### 🛠️ Track 3: Apple Silicon Reverse Engineering & Linux Drivers ([`hardware/`](hardware/))
+### 🛠️ Track 3: Proprietary Apple Hardware Reverse Engineering & Linux Drivers ([`hardware/`](hardware/))
 * **[`hardware/camera-bcm1570/`](hardware/camera-bcm1570/):** Complete reverse engineering of the Broadcom BCM1570 PCIe ISP FaceTime HD camera, DDR ringbuffer IPC protocol, and out-of-tree V4L2 driver (`bcwc_pcie`).
 * **[`hardware/smc-thermals/`](hardware/smc-thermals/):** Apple System Management Controller (SMC) protocol on LPC bus `0x300`, dual-fan tachometer PID control, and 661 hardware monitoring keys.
 * **[`hardware/display-gmux/`](hardware/display-gmux/):** Custom Lattice MachXO CPLD hardware architecture, embedded DisplayPort (eDP) lane multiplexing between Intel Iris Pro and NVIDIA GT 750M, and PWM backlight synthesis.
