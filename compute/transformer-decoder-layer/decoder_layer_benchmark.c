@@ -281,7 +281,7 @@ static char* load_kernel_source(const char* filepath) {
 
 int main(void) {
     printf("========================================================================================\n");
-    printf(" Complete Resident Transformer Decoder Layer on Kepler GT 750M (E2E Telemetry)        \n");
+    printf(" Complete Resident Transformer Decoder Layer on Kepler GT 750M (Hardware Profiling)   \n");
     printf(" Full Qwen2.5-Coder-1.5B Layer Spec (D=1536, FFN=8960, GQA 12:2, T_max=4096)           \n");
     printf("========================================================================================\n");
 
@@ -433,7 +433,7 @@ int main(void) {
     cl_mem d_k_cache = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sz_kv_cache, h_k_cache_cpu, &err); CHECK_CL(err, "d_k_cache");
     cl_mem d_v_cache = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sz_kv_cache, h_v_cache_cpu, &err); CHECK_CL(err, "d_v_cache");
 
-    // Resident Activation Arena with d_qkv reuse for attn_out (saves 6 KB and removes d_attn_out!)
+    // Resident Activation Arena with d_qkv reuse
     cl_mem d_state    = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * D_MODEL, NULL, &err); CHECK_CL(err, "d_state");
     cl_mem d_norm     = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * D_MODEL, NULL, &err); CHECK_CL(err, "d_norm");
     cl_mem d_qkv      = clCreateBuffer(context, CL_MEM_READ_WRITE, sizeof(float) * D_QKV, NULL, &err); CHECK_CL(err, "d_qkv");
@@ -450,9 +450,9 @@ int main(void) {
     int context_lens[] = {1, 32, 128, 512, 1024, 2048};
     int num_contexts = sizeof(context_lens) / sizeof(context_lens[0]);
 
-    printf("%-8s | %-10s | %-11s | %-11s | %-9s | %-12s | %-10s\n",
-           "Tokens", "CPU (8T)", "GPU Compute", "Full E2E", "Speedup", "Max Abs Diff", "Cos Sim");
-    printf("----------------------------------------------------------------------------------------\n");
+    printf("%-8s | %-10s | %-12s | %-11s | %-9s | %-12s | %-12s | %-10s\n",
+           "Tokens", "CPU (8T)", "GPU Silicon", "Full E2E", "Speedup", "Max Abs Diff", "Rel L2 Error", "Cos Sim");
+    printf("------------------------------------------------------------------------------------------------------\n");
 
     for (int c = 0; c < num_contexts; c++) {
         int seq_len = context_lens[c];
@@ -536,13 +536,13 @@ int main(void) {
         // Stage 6b: Reduce Segments into d_qkv[0:1536] (buffer reuse!)
         size_t l_red = 128, g_red = 12 * 128;
         clSetKernelArg(k_pv_reduce, 0, sizeof(cl_mem), &d_partial);
-        clSetKernelArg(k_pv_reduce, 1, sizeof(cl_mem), &d_qkv); // Reuse d_qkv as attn_out!
+        clSetKernelArg(k_pv_reduce, 1, sizeof(cl_mem), &d_qkv);
         clSetKernelArg(k_pv_reduce, 2, sizeof(int), &num_segments);
 
-        // Stage 7: Wo GEMV + Residual (reading from d_qkv!)
+        // Stage 7: Wo GEMV + Residual
         size_t l_wo = 128, g_wo = ((D_MODEL + 3) / 4) * 128;
         clSetKernelArg(k_wo_residual, 0, sizeof(cl_mem), &d_W_o);
-        clSetKernelArg(k_wo_residual, 1, sizeof(cl_mem), &d_qkv); // Reused buffer
+        clSetKernelArg(k_wo_residual, 1, sizeof(cl_mem), &d_qkv);
         clSetKernelArg(k_wo_residual, 2, sizeof(cl_mem), &d_state);
         clSetKernelArg(k_wo_residual, 3, sizeof(int), &d_model);
 
@@ -570,7 +570,7 @@ int main(void) {
         clSetKernelArg(k_down_res, 3, sizeof(int), &d_model);
         clSetKernelArg(k_down_res, 4, sizeof(int), &d_ffn);
 
-        // Single Warmup execution
+        // Warmup execution
         clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, NULL);
         clEnqueueNDRangeKernel(queue, k_qkv_gemv, 1, NULL, &g_qkv, &l_qkv, 0, NULL, NULL);
         clEnqueueNDRangeKernel(queue, k_rope_kv, 1, NULL, &g_rope, &l_rope, 0, NULL, NULL);
@@ -593,47 +593,63 @@ int main(void) {
             h_k_cache_cpu, h_v_cache_cpu, pos, seq_len, h_y_cpu
         );
 
-        // Compute numerical accuracy metrics
+        // Verification & Numerical Metrics
         float max_diff = 0.0f;
+        double diff_sq_sum = 0.0, ref_sq_sum = 0.0;
         double dot_prod = 0.0, norm_cpu = 0.0, norm_gpu = 0.0;
+        bool all_finite = true;
+
         for (int i = 0; i < D_MODEL; i++) {
+            if (!isfinite(h_y_gpu[i]) || !isfinite(h_y_cpu[i])) all_finite = false;
             float diff = fabsf(h_y_gpu[i] - h_y_cpu[i]);
             if (diff > max_diff) max_diff = diff;
-            dot_prod += (double)h_y_gpu[i] * (double)h_y_cpu[i];
-            norm_cpu += (double)h_y_cpu[i] * (double)h_y_cpu[i];
-            norm_gpu += (double)h_y_gpu[i] * (double)h_y_gpu[i];
+            diff_sq_sum += (double)diff * (double)diff;
+            ref_sq_sum  += (double)h_y_cpu[i] * (double)h_y_cpu[i];
+            dot_prod    += (double)h_y_gpu[i] * (double)h_y_cpu[i];
+            norm_cpu    += (double)h_y_cpu[i] * (double)h_y_cpu[i];
+            norm_gpu    += (double)h_y_gpu[i] * (double)h_y_gpu[i];
         }
+        assert(all_finite && "Outputs contain non-finite values (NaN / Inf)!");
+        double rel_l2_error = sqrt(diff_sq_sum) / sqrt(ref_sq_sum);
         double cos_sim = dot_prod / (sqrt(norm_cpu) * sqrt(norm_gpu));
 
         const int iters = 20;
-        double total_gpu_compute_us = 0.0;
+        double total_gpu_silicon_us = 0.0;
         double total_gpu_e2e_us = 0.0;
         double total_cpu_us = 0.0;
 
+        cl_event events[11];
+
         for (int it = 0; it < iters; it++) {
-            // Full E2E: Upload x -> Launch Kernels -> clFinish -> Download y
             double t_e2e_0 = get_time_us();
             clEnqueueWriteBuffer(queue, d_state, CL_FALSE, 0, sizeof(float) * D_MODEL, h_x, 0, NULL, NULL);
 
-            double t_gpu_0 = get_time_us();
-            clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_qkv_gemv, 1, NULL, &g_qkv, &l_qkv, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_rope_kv, 1, NULL, &g_rope, &l_rope, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_scores, 2, NULL, g_scores, l_scores, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_softmax, 1, NULL, &g_soft, &l_soft, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_pv_combine, 2, NULL, g_pv, l_pv, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_pv_reduce, 1, NULL, &g_red, &l_red, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_wo_residual, 1, NULL, &g_wo, &l_wo, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_rmsnorm_ffn, 1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_swiglu_fused, 1, NULL, &g_swiglu, &l_swiglu, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_down_res, 1, NULL, &g_down, &l_down, 0, NULL, NULL);
-            clFinish(queue);
-            double t_gpu_1 = get_time_us();
+            clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, &events[0]);
+            clEnqueueNDRangeKernel(queue, k_qkv_gemv, 1, NULL, &g_qkv, &l_qkv, 0, NULL, &events[1]);
+            clEnqueueNDRangeKernel(queue, k_rope_kv, 1, NULL, &g_rope, &l_rope, 0, NULL, &events[2]);
+            clEnqueueNDRangeKernel(queue, k_scores, 2, NULL, g_scores, l_scores, 0, NULL, &events[3]);
+            clEnqueueNDRangeKernel(queue, k_softmax, 1, NULL, &g_soft, &l_soft, 0, NULL, &events[4]);
+            clEnqueueNDRangeKernel(queue, k_pv_combine, 2, NULL, g_pv, l_pv, 0, NULL, &events[5]);
+            clEnqueueNDRangeKernel(queue, k_pv_reduce, 1, NULL, &g_red, &l_red, 0, NULL, &events[6]);
+            clEnqueueNDRangeKernel(queue, k_wo_residual, 1, NULL, &g_wo, &l_wo, 0, NULL, &events[7]);
+            clEnqueueNDRangeKernel(queue, k_rmsnorm_ffn, 1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, &events[8]);
+            clEnqueueNDRangeKernel(queue, k_swiglu_fused, 1, NULL, &g_swiglu, &l_swiglu, 0, NULL, &events[9]);
+            clEnqueueNDRangeKernel(queue, k_down_res, 1, NULL, &g_down, &l_down, 0, NULL, &events[10]);
 
             clEnqueueReadBuffer(queue, d_state, CL_TRUE, 0, sizeof(float) * D_MODEL, h_y_gpu, 0, NULL, NULL);
             double t_e2e_1 = get_time_us();
 
-            total_gpu_compute_us += (t_gpu_1 - t_gpu_0);
+            // Extract pure GPU silicon execution time via OpenCL Profiling hardware counters
+            cl_ulong t_first_start = 0, t_last_end = 0;
+            clGetEventProfilingInfo(events[0],  CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &t_first_start, NULL);
+            clGetEventProfilingInfo(events[10], CL_PROFILING_COMMAND_END,   sizeof(cl_ulong), &t_last_end, NULL);
+            double silicon_us = (double)(t_last_end - t_first_start) * 1e-3;
+
+            for (int k = 0; k < 11; k++) {
+                clReleaseEvent(events[k]);
+            }
+
+            total_gpu_silicon_us += silicon_us;
             total_gpu_e2e_us     += (t_e2e_1 - t_e2e_0);
 
             double t_cpu_0 = get_time_us();
@@ -649,17 +665,17 @@ int main(void) {
         clReleaseMemObject(d_k_sub);
         clReleaseMemObject(d_v_sub);
 
-        double avg_gpu_compute_ms = (total_gpu_compute_us / (double)iters) / 1000.0;
+        double avg_gpu_silicon_ms = (total_gpu_silicon_us / (double)iters) / 1000.0;
         double avg_gpu_e2e_ms     = (total_gpu_e2e_us / (double)iters) / 1000.0;
         double avg_cpu_ms         = (total_cpu_us / (double)iters) / 1000.0;
         double speedup            = avg_cpu_ms / avg_gpu_e2e_ms;
 
-        printf("T=%-6d | %7.2f ms | %8.2f ms | %8.2f ms | %7.2fx | %12.4e | %8.6f\n",
-               seq_len, avg_cpu_ms, avg_gpu_compute_ms, avg_gpu_e2e_ms, speedup, max_diff, cos_sim);
+        printf("T=%-6d | %7.2f ms | %8.2f ms  | %8.2f ms | %7.2fx | %12.4e | %12.4e | %8.6f\n",
+               seq_len, avg_cpu_ms, avg_gpu_silicon_ms, avg_gpu_e2e_ms, speedup, max_diff, rel_l2_error, cos_sim);
     }
 
-    printf("----------------------------------------------------------------------------------------\n");
-    printf("Decoder Layer evaluation completed successfully.\n");
+    printf("------------------------------------------------------------------------------------------------------\n");
+    printf("Hardware-profiled evaluation completed successfully.\n");
 
     clReleaseMemObject(d_W_qkv);
     clReleaseMemObject(d_b_qkv);

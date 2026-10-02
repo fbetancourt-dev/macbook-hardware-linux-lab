@@ -13,7 +13,7 @@ A modern autoregressive decoder layer executes two core sub-layers with residual
 All weights (~25.10 MB in `Q4_0`), persistent KV caches (8.00 MB per layer in FP32), and dynamic activations remain **100% resident in GPU VRAM**. 
 
 ### Buffer Reuse Optimization
-After RoPE and KV cache updates, the query portion $Q$ ($1536 \text{ floats}$) of `d_qkv` is no longer needed. The Flash-Decoding partial reduction writes directly back into `d_qkv[0:1536]`, completely eliminating the dedicated `d_attn_out` buffer and shrinking the dynamic arena to just **0.33 MB**.
+After RoPE and KV cache updates, the query portion $Q$ ($1536 \text{ floats}$) of `d_qkv` is no longer needed. The Split-K partial reduction writes directly back into `d_qkv[0:1536]`, completely eliminating the dedicated `d_attn_out` buffer and shrinking the dynamic arena to just **0.33 MB**.
 
 ```
 Host Memory (x: 6 KB)
@@ -57,33 +57,37 @@ Host Memory (x: 6 KB)
 
 ---
 
-## 📊 Measured Empirical Results (Physical Hardware Benchmark)
+## 📊 Measured Empirical Results (Physical Hardware Benchmark with OpenCL Events)
 
 - **Device:** NVIDIA GeForce GT 750M (Kepler GK107, 384 cores, 2 GB GDDR5) via Mesa Rusticl OpenCL 3.0 (`NVE7`).
 - **CPU Reference:** Intel Core i7-4870HQ @ 2.50 GHz (Haswell AVX2 + FMA3, 8 OpenMP threads).
-- **Benchmark Methodology:** 20 alternated, interleaved iterations measuring pure GPU compute and full E2E host wall-clock (upload + compute + download).
+- **GPU Silicon Time:** Pure kernel execution time in GPU hardware counters (`clGetEventProfilingInfo`).
+- **Full E2E Time:** Host wall-clock from upload ($x$) through all 11 kernels to final download ($y$).
+- **Benchmark Methodology:** 20 alternated, interleaved iterations with strict `isfinite` checks and relative $L_2$ error.
 
-| Context Length ($T$) | CPU Haswell (8T) | GPU Compute | Full E2E (PCIe) | Speedup vs CPU | Max Abs Diff | Cosine Similarity |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **$T = 1$** | $59.98\text{ ms}$ | **$28.20\text{ ms}$** | **$28.62\text{ ms}$** | **$2.10\times$** 🚀 | $1.76 \times 10^{-2}$ | **$1.000000$** |
-| **$T = 32$** | $54.92\text{ ms}$ | **$30.14\text{ ms}$** | **$30.80\text{ ms}$** | **$1.78\times$** 🚀 | $1.07 \times 10^{-2}$ | **$1.000000$** |
-| **$T = 128$** | $61.36\text{ ms}$ | **$45.35\text{ ms}$** | **$47.24\text{ ms}$** | **$1.30\times$** 🚀 | $1.27 \times 10^{-2}$ | **$1.000000$** |
-| **$T = 512$** | $98.14\text{ ms}$ | **$85.82\text{ ms}$** | **$95.45\text{ ms}$** | **$1.03\times$** 🚀 | $1.37 \times 10^{-2}$ | **$1.000000$** |
-| **$T = 1024$** | $106.85\text{ ms}$ | $109.49\text{ ms}$ | $123.48\text{ ms}$ | $0.87\times$ | $1.07 \times 10^{-2}$ | **$1.000000$** |
-| **$T = 2048$** | $71.72\text{ ms}$ | $75.18\text{ ms}$ | $82.35\text{ ms}$ | $0.87\times$ | $1.37 \times 10^{-2}$ | **$1.000000$** |
+| Context Length ($T$) | CPU Haswell (8T) | GPU Silicon (Hardware) | Full E2E (Host + PCIe) | Speedup vs CPU | Max Abs Diff | Relative $L_2$ Error | Cosine Similarity |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **$T = 1$** | $59.08\text{ ms}$ | **$26.72\text{ ms}$** | **$31.78\text{ ms}$** | **$1.86\times$** 🚀 | $1.76 \times 10^{-2}$ | **$6.65 \times 10^{-7}$** | **$1.000000$** |
+| **$T = 32$** | $58.43\text{ ms}$ | **$28.34\text{ ms}$** | **$34.02\text{ ms}$** | **$1.72\times$** 🚀 | $1.07 \times 10^{-2}$ | **$5.29 \times 10^{-7}$** | **$1.000000$** |
+| **$T = 128$** | $49.46\text{ ms}$ | **$29.85\text{ ms}$** | **$34.47\text{ ms}$** | **$1.43\times$** 🚀 | $1.27 \times 10^{-2}$ | **$4.52 \times 10^{-7}$** | **$1.000000$** |
+| **$T = 512$** | $51.21\text{ ms}$ | **$31.55\text{ ms}$** | **$34.69\text{ ms}$** | **$1.48\times$** 🚀 | $1.37 \times 10^{-2}$ | **$5.30 \times 10^{-7}$** | **$1.000000$** |
+| **$T = 1024$** | $61.77\text{ ms}$ | **$41.92\text{ ms}$** | **$50.51\text{ ms}$** | **$1.22\times$** 🚀 | $1.07 \times 10^{-2}$ | **$3.61 \times 10^{-7}$** | **$1.000000$** |
+| **$T = 2048$** | $57.79\text{ ms}$ | **$53.21\text{ ms}$** | **$59.64\text{ ms}$** | **$0.97\times$** | $1.37 \times 10^{-2}$ | **$7.15 \times 10^{-7}$** | **$1.000000$** |
 
 ---
 
-## 🔬 Key Engineering Insights & Validation
+## 🔬 Key Engineering Insights
 
-1. **Perfect Numerical Alignment (Cosine Sim = 1.000000):**
-   - By eliminating `native_powr` and replacing it with IEEE `powr`, resetting KV cache test slices between contexts, and matching CPU/GPU Softmax normalization, the maximum absolute difference dropped across all contexts to **$\le 1.76 \times 10^{-2}$**, with **Cosine Similarity = 1.000000** at every context length up to $T=2048$.
-2. **Short-to-Medium Context Dominance ($T=1 \dots 512$):**
-   - In generation mode ($T=1 \dots 32$), the GPU delivers **$2.10\times$ speedup** over all 8 CPU threads, completing the full decoder layer in **$28.62\text{ ms}$ E2E**.
-3. **KV Cache Scalability for 28 Layers:**
-   - At $T=4096$, each layer requires 8.00 MB of FP32 KV cache. Across all 28 layers of Qwen2.5-Coder-1.5B, the full cache requires **224 MB**, which easily fits into the 2048 MB VRAM of the GT 750M.
-4. **Next Optimization Target (Online Flash-Decoding Softmax):**
-   - At $T \ge 1024$, attention score generation and global Softmax VRAM passes introduce bandwidth overhead. Fusing Softmax into the Split-K value combination tile will eliminate the `d_scores` global roundtrips.
+1. **Hardware Silicon Time vs Host E2E:**
+   - Pure GPU silicon time is **$26.72\text{ ms}$ at $T=1$** and stays below **$32\text{ ms}$ up to $T=512$**.
+   - Host queue overhead and PCIe transfers add $\approx 3 - 5\text{ ms}$, yielding **$31.78\text{ ms}$ full E2E** ($1.86\times$ faster than 8-thread Haswell CPU).
+2. **Mathematical Precision Conclusive:**
+   - Zero NaNs/Infs (`isfinite` checked across all vectors).
+   - Relative $L_2$ error is in the **$10^{-7}$ range** ($\approx 5.3 \times 10^{-7}$) across all context lengths.
+   - Cosine similarity is **$1.000000$** throughout $T=1 \dots 2048$.
+3. **Smooth Attention Scaling:**
+   - Hardware silicon time scales cleanly: $26.72\text{ ms}$ ($T=1$) $\to 28.34\text{ ms}$ ($T=32$) $\to 29.85\text{ ms}$ ($T=128$) $\to 31.55\text{ ms}$ ($T=512$) $\to 41.92\text{ ms}$ ($T=1024$) $\to 53.21\text{ ms}$ ($T=2048$).
+   - The GPU remains ahead of CPU up to $T=1024$ ($1.22\times$), reaching parity at $T=2048$ ($0.97\times$).
 
 ---
 
