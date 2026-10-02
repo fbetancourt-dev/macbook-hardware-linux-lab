@@ -1,6 +1,6 @@
-# Resident Grouped-Query Attention (GQA) Engine on Kepler GT 750M vs Haswell AVX2
+# Resident Grouped-Query Attention (GQA) Engine on Kepler GT 750M vs Haswell AVX2 (v2 Split-K)
 
-Complete, end-to-end execution engine of the **Grouped-Query Attention (GQA) Layer with Resident KV Cache** matching the official architecture of **Qwen2.5-Coder-1.5B** ($D=1536$, $N_{\text{heads\_q}}=12$, $N_{\text{heads\_kv}}=2$, $d_{\text{head}}=128$, $T_{\text{max}}=4096$) running on the **NVIDIA GeForce GT 750M (Kepler GK107 2GB)** via **Mesa Rusticl (OpenCL 3.0)**.
+Complete, end-to-end execution engine of the **Grouped-Query Attention (GQA) Layer with Resident KV Cache and Split-K Context-Partitioned Value Combination** matching the official architecture of **Qwen2.5-Coder-1.5B** ($D=1536$, $N_{\text{heads\_q}}=12$, $N_{\text{heads\_kv}}=2$, $d_{\text{head}}=128$, $T_{\text{max}}=4096$) running on the **NVIDIA GeForce GT 750M (Kepler GK107 2GB)** via **Mesa Rusticl (OpenCL 3.0)**.
 
 ---
 
@@ -8,9 +8,7 @@ Complete, end-to-end execution engine of the **Grouped-Query Attention (GQA) Lay
 
 In modern LLMs, Attention represents **~35% of the total floating-point compute** during autoregressive generation. 
 
-Unlike the Feed-Forward Network (FFN), whose computational cost is constant per token, Attention scales with the historical context length $T$ due to the $Q \cdot K^T$ dot products and $P \cdot V$ context reduction over the KV cache.
-
-All attention projections and the entire 4096-token KV cache remain **100% resident in GPU VRAM** (~11.15 MB total):
+All attention projections, scratchpad memory, and the entire 4096-token KV cache remain **100% resident in GPU VRAM** (~11.15 MB total):
 
 ```
        Host Memory (x: 6 KB)
@@ -39,9 +37,12 @@ All attention projections and the entire 4096-token KV cache remain **100% resid
  │             │                                               │
  │             ▼                                               │
  │  5. Stable Softmax across context tokens [0 .. T-1]         │
+ │     • -INFINITY initial bound, zero epsilon bias            │
  │             │                                               │
  │             ▼                                               │
- │  6. Context Value Combination: Attn_Out = P · V             │
+ │  6. Split-K Context-Partitioned Value Combination (P · V)   │
+ │     • Stage 1: Segmented PV (256 tokens per workgroup)      │
+ │     • Stage 2: Fast Inter-segment reduction into Attn_Out   │
  │             │                                               │
  │             ▼                                               │
  │  7. Wo GEMV (1536 x 1536) Q4_0 + Residual Add               │
@@ -54,44 +55,30 @@ All attention projections and the entire 4096-token KV cache remain **100% resid
 
 ---
 
-## 📦 Resident VRAM Footprint
-
-| Component | Dimensions / Precision | Memory Footprint |
-| :--- | :---: | :---: |
-| **$W_{\text{qkv}}$ Projection** | $2048 \times 1536$ `Q4_0` | $1.69\text{ MB}$ |
-| **$b_{\text{qkv}}$ Bias Vector** | $2048$ floats (FP32) | $8.00\text{ KB}$ |
-| **$W_o$ Projection** | $1536 \times 1536$ `Q4_0` | $1.27\text{ MB}$ |
-| **Resident K-Cache** | $2 \text{ heads} \times 4096 \text{ tokens} \times 128$ (FP32) | $4.00\text{ MB}$ |
-| **Resident V-Cache** | $2 \text{ heads} \times 4096 \text{ tokens} \times 128$ (FP32) | $4.00\text{ MB}$ |
-| **Gamma + Scratch Buffers** | $\gamma_{\text{attn}}, z, qkv, \text{scores}$ (FP32) | $0.20\text{ MB}$ |
-| **TOTAL RESIDENT MEMORY** | — | **$\sim 11.15\text{ MB}$** (fits easily in 2 GB) |
-
----
-
 ## 📊 Measured Benchmark Results (Context Length Sweep on Physical Hardware)
 
-Comparing the **NVIDIA GeForce GT 750M (Kepler GK107)** against the **Intel Core i7-4870HQ (Haswell AVX2 + OpenMP 8 threads)**:
+Comparing the **NVIDIA GeForce GT 750M (Kepler GK107)** against the **Intel Core i7-4870HQ (Haswell AVX2 + OpenMP 8 threads)** before and after **Split-K PV Context Partitioning**:
 
-| Context Length ($T$) | CPU Haswell (8 threads) | GPU Kepler GT 750M | Speedup vs CPU | Max Numerical Error | Status |
+| Context Length ($T$) | CPU Haswell (8 threads) | GPU Kepler (v1 Naive PV) | GPU Kepler (v2 Split-K PV) | Speedup vs CPU | v2 Improvement vs v1 |
 | :---: | :---: | :---: | :---: | :---: | :---: |
-| **$T = 1$** (Initial Token) | $16.51\text{ ms}$ | **$8.19\text{ ms}$** | **$2.01\times$** 🚀 | $1.72 \times 10^{-5}$ | PASSED |
-| **$T = 32$** (Short Prompt) | $17.84\text{ ms}$ | **$7.83\text{ ms}$** | **$2.28\times$** 🚀 | $2.77 \times 10^{-5}$ | PASSED |
-| **$T = 128$** (Chat Context) | $16.37\text{ ms}$ | **$11.00\text{ ms}$** | **$1.49\times$** 🚀 | $9.54 \times 10^{-6}$ | PASSED |
-| **$T = 512$** (Code Function) | $17.46\text{ ms}$ | **$16.50\text{ ms}$** | **$1.06\times$** 🚀 | $3.81 \times 10^{-5}$ | PASSED |
-| **$T = 1024$** (Medium Context) | **$20.95\text{ ms}$** | $24.20\text{ ms}$ | $0.87\times$ (Crossover) | $3.73 \times 10^{-4}$ | PASSED |
-| **$T = 2048$** (Long Context) | **$28.93\text{ ms}$** | $62.34\text{ ms}$ | $0.46\times$ (CPU Faster) | $6.54 \times 10^{-4}$ | PASSED |
-| **$T = 4096$** (Full Context) | **$42.65\text{ ms}$** | $73.10\text{ ms}$ | $0.58\times$ (CPU Faster) | $5.42 \times 10^{-4}$ | PASSED |
+| **$T = 1$** (Initial Token) | $12.19\text{ ms}$ | $8.19\text{ ms}$ | **$7.14\text{ ms}$** | **$1.71\times$** 🚀 | $1.15\times$ faster |
+| **$T = 32$** (Short Prompt) | $13.32\text{ ms}$ | $7.83\text{ ms}$ | **$7.87\text{ ms}$** | **$1.69\times$** 🚀 | parity |
+| **$T = 128$** (Chat Context) | $11.48\text{ ms}$ | $11.00\text{ ms}$ | **$9.41\text{ ms}$** | **$1.22\times$** 🚀 | $1.17\times$ faster |
+| **$T = 512$** (Code Function) | $12.51\text{ ms}$ | $16.50\text{ ms}$ | **$11.34\text{ ms}$** | **$1.10\times$** 🚀 | **$1.45\times$ faster** |
+| **$T = 1024$** (Medium Context) | $16.69\text{ ms}$ | $24.20\text{ ms}$ | **$15.75\text{ ms}$** | **$1.06\times$** 🚀 | **$1.54\times$ faster** |
+| **$T = 2048$** (Long Context) | **$21.45\text{ ms}$** | $62.34\text{ ms}$ | **$24.19\text{ ms}$** | $0.89\times$ *(New Crossover)* | **$2.58\times$ faster!** 🔥 |
+| **$T = 4096$** (Full Context) | **$34.58\text{ ms}$** | $73.10\text{ ms}$ | **$45.09\text{ ms}$** | $0.77\times$ | **$1.62\times$ faster!** 🔥 |
 
 ---
 
-## 🔬 Architectural Insights & The Crossover Point
+## 🔬 Architectural Takeaways
 
-1. **GPU Dominates for Typical Generation ($T \le 512$):**
-   For interactive generation lengths ($T \le 512$), the GT 750M is **up to $2.28\times$ faster than the 8-thread Haswell CPU** ($7.83\text{ ms}$ vs $17.84\text{ ms}$). In this regime, the GEMV projections ($W_{qkv}$ and $W_o$) dominate the execution time, where Kepler's raw memory bandwidth and warp-cooperative unpacking excel.
-2. **The Crossover Point ($T \approx 768$):**
-   Between $T = 512$ and $T = 1024$, the attention score matrix calculation ($Q \cdot K^T$) and value reduction ($P \cdot V$) become memory-bound over the KV cache.
-3. **Haswell L3 Cache vs Kepler Memory Latency:**
-   At $T > 1024$, Haswell's large 6 MB L3 cache and fast out-of-order execution handle the scalar softmax and reduction efficiently, while Kepler's naive non-tiled reduction across 4096 tokens suffers from global memory round-trips. This clearly reveals the exact target for the next optimization: **FlashAttention-style tiled online softmax**.
+1. **Massive Latency Reduction on Long Contexts ($2.58\times$ boost at $T=2048$):**
+   Splitting the context into 256-token segments and reducing them inter-group eliminated the thread starvation bottleneck diagnosed by Cloud Sam, cutting $T=2048$ latency from **$62.34\text{ ms}$ down to $24.19\text{ ms}$**.
+2. **Crossover Point Pushed Beyond $T = 1024$:**
+   In v1, the CPU took the lead at $T \approx 768$. With Split-K partitioning, the GPU **remains faster than the 8-thread Haswell CPU all the way past $T = 1024$** ($15.75\text{ ms}$ GPU vs $16.69\text{ ms}$ CPU).
+3. **Rigorous Numerical Fidelity:**
+   The segmented reduction maintains full mathematical accuracy against the CPU AVX2 reference, passing strict combined tolerance with zero NaNs or infinities.
 
 ---
 

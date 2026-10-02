@@ -22,7 +22,9 @@ typedef struct {
 // =========================================================================
 // 1. RMSNorm Kernel (D_MODEL elements, 1 work-group of 128 threads)
 // =========================================================================
-__kernel void kernel_rmsnorm(
+__kernel 
+__attribute__((reqd_work_group_size(128, 1, 1)))
+void kernel_rmsnorm(
     __global const float *x,
     __global const float *gamma,
     __global float       *z,
@@ -267,7 +269,7 @@ void kernel_softmax_gqa(
     __local float l_sum;
 
     // 1. Find Max
-    float local_max = -1e30f;
+    float local_max = -INFINITY;
     for (int t = tid; t < seq_len; t += n_threads) {
         float val = head_scores[t];
         if (val > local_max) local_max = val;
@@ -323,42 +325,75 @@ void kernel_softmax_gqa(
     barrier(CLK_LOCAL_MEM_FENCE);
 
     // 3. Normalize
-    float inv_sum = 1.0f / (l_sum + 1e-12f);
+    float inv_sum = 1.0f / l_sum;
     for (int t = tid; t < seq_len; t += n_threads) {
         head_scores[t] *= inv_sum;
     }
 }
 
 // =========================================================================
-// 6. Attention Weighted Context Combination (Attn_Out = Weights * V)
-// Computes attn_out[head_q, dim] = sum_t (probs[head_q, t] * v_cache[head_kv, t, dim])
-// 12 heads * 128 dims = 1536 outputs.
-// Work-item i processes dimension i directly.
+// 6. Split-K Context-Partitioned PV Combination (Flash-Decoding style)
+// Splits context into chunks of SEGMENT_SIZE (e.g. 128 or 256).
+// Stage 1: Computes partial outputs [N_HEADS_Q, num_segments, 128]
+// Stage 2: Reduces the partial segments into final attn_out[N_HEADS_Q, 128]
 // =========================================================================
-__kernel void kernel_gqa_value_combine(
+#define PV_SEGMENT_SIZE 256
+
+__kernel 
+__attribute__((reqd_work_group_size(HEAD_DIM, 1, 1)))
+void kernel_gqa_value_combine_segmented(
     __global const float *probs,    // [12, T_MAX]
     __global const float *v_cache,  // [2, T_MAX, 128]
-    __global float       *attn_out, // [12, 128] = [1536]
+    __global float       *partial,  // [12, MAX_SEGMENTS, 128]
     const int seq_len,
-    const int t_max
+    const int t_max,
+    const int num_segments
 ) {
-    int dim = get_global_id(0); // 0 to 127
-    int h_q = get_global_id(1); // 0 to 11
+    int dim = get_local_id(0);      // 0 to 127
+    int seg = get_group_id(0);      // 0 to num_segments - 1
+    int h_q = get_group_id(1);      // 0 to 11
 
-    if (dim >= HEAD_DIM || h_q >= N_HEADS_Q) return;
+    if (h_q >= N_HEADS_Q || seg >= num_segments) return;
 
     int h_kv = h_q / GQA_GROUP_SIZE; // shared KV head
+
+    int t_start = seg * PV_SEGMENT_SIZE;
+    int t_end   = t_start + PV_SEGMENT_SIZE;
+    if (t_end > seq_len) t_end = seq_len;
 
     __global const float *head_probs = probs + h_q * t_max;
 
     float acc = 0.0f;
-    for (int t = 0; t < seq_len; t++) {
+    for (int t = t_start; t < t_end; t++) {
         float p = head_probs[t];
         int v_idx = (h_kv * t_max + t) * HEAD_DIM + dim;
         acc += p * v_cache[v_idx];
     }
 
-    attn_out[h_q * HEAD_DIM + dim] = acc;
+    // Write partial result
+    int partial_idx = (h_q * num_segments + seg) * HEAD_DIM + dim;
+    partial[partial_idx] = acc;
+}
+
+__kernel 
+__attribute__((reqd_work_group_size(HEAD_DIM, 1, 1)))
+void kernel_gqa_reduce_segments(
+    __global const float *partial,  // [12, MAX_SEGMENTS, 128]
+    __global float       *attn_out, // [12, 128]
+    const int num_segments
+) {
+    int dim = get_local_id(0);      // 0 to 127
+    int h_q = get_group_id(0);      // 0 to 11
+
+    if (h_q >= N_HEADS_Q) return;
+
+    float sum = 0.0f;
+    int base_offset = h_q * num_segments * HEAD_DIM + dim;
+    for (int s = 0; s < num_segments; s++) {
+        sum += partial[base_offset + s * HEAD_DIM];
+    }
+
+    attn_out[h_q * HEAD_DIM + dim] = sum;
 }
 
 // =========================================================================

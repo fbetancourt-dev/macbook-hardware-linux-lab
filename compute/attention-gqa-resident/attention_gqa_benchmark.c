@@ -301,9 +301,11 @@ int main(void) {
     CHECK_CL(err, "k_gqa_scores");
     cl_kernel k_softmax      = clCreateKernel(prog, "kernel_softmax_gqa", &err);
     CHECK_CL(err, "k_softmax");
-    cl_kernel k_val_combine  = clCreateKernel(prog, "kernel_gqa_value_combine", &err);
-    CHECK_CL(err, "k_val_combine");
-    cl_kernel k_wo_residual  = clCreateKernel(prog, "gemv_q4_0_wo_residual", &err);
+    cl_kernel k_val_segmented = clCreateKernel(prog, "kernel_gqa_value_combine_segmented", &err);
+    CHECK_CL(err, "k_val_segmented");
+    cl_kernel k_val_reduce    = clCreateKernel(prog, "kernel_gqa_reduce_segments", &err);
+    CHECK_CL(err, "k_val_reduce");
+    cl_kernel k_wo_residual   = clCreateKernel(prog, "gemv_q4_0_wo_residual", &err);
     CHECK_CL(err, "k_wo_residual");
 
     // Dimensions
@@ -379,6 +381,12 @@ int main(void) {
     cl_mem d_z        = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_MODEL * sizeof(float), NULL, &err);
     cl_mem d_qkv      = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_QKV * sizeof(float), NULL, &err);
     cl_mem d_scores   = clCreateBuffer(ctx, CL_MEM_READ_WRITE, scores_bytes, NULL, &err);
+    // Partial PV Buffer: [12 heads, 32 max segments, 128 dim] = 192 KB
+    const int MAX_SEGMENTS = 32;
+    size_t partial_pv_bytes = (size_t)N_HEADS_Q * MAX_SEGMENTS * HEAD_DIM * sizeof(float);
+    cl_mem d_pv_partial = clCreateBuffer(ctx, CL_MEM_READ_WRITE, partial_pv_bytes, NULL, &err);
+    CHECK_CL(err, "d_pv_partial");
+
     cl_mem d_attn_out = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_MODEL * sizeof(float), NULL, &err);
     cl_mem d_r_out    = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_MODEL * sizeof(float), NULL, &err);
 
@@ -472,11 +480,19 @@ int main(void) {
         clSetKernelArg(k_softmax, 1, sizeof(int), &seq_len);
         clSetKernelArg(k_softmax, 2, sizeof(int), &t_max);
 
-        clSetKernelArg(k_val_combine, 0, sizeof(cl_mem), &d_scores);
-        clSetKernelArg(k_val_combine, 1, sizeof(cl_mem), &d_v_cache);
-        clSetKernelArg(k_val_combine, 2, sizeof(cl_mem), &d_attn_out);
-        clSetKernelArg(k_val_combine, 3, sizeof(int), &seq_len);
-        clSetKernelArg(k_val_combine, 4, sizeof(int), &t_max);
+        int num_segments = (seq_len + 255) / 256;
+        if (num_segments > 32) num_segments = 32;
+
+        clSetKernelArg(k_val_segmented, 0, sizeof(cl_mem), &d_scores);
+        clSetKernelArg(k_val_segmented, 1, sizeof(cl_mem), &d_v_cache);
+        clSetKernelArg(k_val_segmented, 2, sizeof(cl_mem), &d_pv_partial);
+        clSetKernelArg(k_val_segmented, 3, sizeof(int), &seq_len);
+        clSetKernelArg(k_val_segmented, 4, sizeof(int), &t_max);
+        clSetKernelArg(k_val_segmented, 5, sizeof(int), &num_segments);
+
+        clSetKernelArg(k_val_reduce, 0, sizeof(cl_mem), &d_pv_partial);
+        clSetKernelArg(k_val_reduce, 1, sizeof(cl_mem), &d_attn_out);
+        clSetKernelArg(k_val_reduce, 2, sizeof(int), &num_segments);
 
         // NDRanges
         size_t local_norm = 128, global_norm = 128;
@@ -488,8 +504,12 @@ int main(void) {
         size_t local_scores[2] = {32, 1};
         size_t global_scores[2] = { (size_t)seq_len * 32, (size_t)N_HEADS_Q };
         size_t local_soft = 128, global_soft = 12 * 128;
-        size_t local_val[2] = {16, 1};
-        size_t global_val[2] = { (size_t)HEAD_DIM, (size_t)N_HEADS_Q };
+
+        // Split-K Segmented PV NDRange: [HEAD_DIM, num_segments, N_HEADS_Q]
+        size_t local_val_seg[2]  = {128, 1};
+        size_t global_val_seg[2] = { (size_t)128 * num_segments, (size_t)N_HEADS_Q };
+        size_t local_val_red     = 128;
+        size_t global_val_red    = 12 * 128;
 
         // Warmup GPU
         for (int it = 0; it < 3; it++) {
@@ -499,7 +519,8 @@ int main(void) {
             clEnqueueNDRangeKernel(queue, k_rope_append, 1, NULL, &global_rope, &local_rope, 0, NULL, NULL);
             clEnqueueNDRangeKernel(queue, k_gqa_scores, 2, NULL, global_scores, local_scores, 0, NULL, NULL);
             clEnqueueNDRangeKernel(queue, k_softmax, 1, NULL, &global_soft, &local_soft, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_val_combine, 2, NULL, global_val, local_val, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_val_segmented, 2, NULL, global_val_seg, local_val_seg, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_val_reduce, 1, NULL, &global_val_red, &local_val_red, 0, NULL, NULL);
             clEnqueueNDRangeKernel(queue, k_wo_residual, 1, NULL, &global_wo, &local_warp, 0, NULL, NULL);
             clEnqueueReadBuffer(queue, d_r_out, CL_TRUE, 0, D_MODEL * sizeof(float), h_r_gpu, 0, NULL, NULL);
         }
@@ -515,7 +536,8 @@ int main(void) {
             clEnqueueNDRangeKernel(queue, k_rope_append, 1, NULL, &global_rope, &local_rope, 0, NULL, NULL);
             clEnqueueNDRangeKernel(queue, k_gqa_scores, 2, NULL, global_scores, local_scores, 0, NULL, NULL);
             clEnqueueNDRangeKernel(queue, k_softmax, 1, NULL, &global_soft, &local_soft, 0, NULL, NULL);
-            clEnqueueNDRangeKernel(queue, k_val_combine, 2, NULL, global_val, local_val, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_val_segmented, 2, NULL, global_val_seg, local_val_seg, 0, NULL, NULL);
+            clEnqueueNDRangeKernel(queue, k_val_reduce, 1, NULL, &global_val_red, &local_val_red, 0, NULL, NULL);
             clEnqueueNDRangeKernel(queue, k_wo_residual, 1, NULL, &global_wo, &local_warp, 0, NULL, NULL);
             clEnqueueReadBuffer(queue, d_r_out, CL_FALSE, 0, D_MODEL * sizeof(float), h_r_gpu, 0, NULL, &ev_done);
             clWaitForEvents(1, &ev_done);
@@ -564,6 +586,7 @@ int main(void) {
     clReleaseMemObject(d_z);
     clReleaseMemObject(d_qkv);
     clReleaseMemObject(d_scores);
+    clReleaseMemObject(d_pv_partial);
     clReleaseMemObject(d_attn_out);
     clReleaseMemObject(d_r_out);
 
@@ -572,7 +595,8 @@ int main(void) {
     clReleaseKernel(k_rope_append);
     clReleaseKernel(k_gqa_scores);
     clReleaseKernel(k_softmax);
-    clReleaseKernel(k_val_combine);
+    clReleaseKernel(k_val_segmented);
+    clReleaseKernel(k_val_reduce);
     clReleaseKernel(k_wo_residual);
 
     clReleaseProgram(prog);
