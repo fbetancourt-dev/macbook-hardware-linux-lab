@@ -20,6 +20,13 @@ typedef struct {
     uint8_t qs[16];   // 32 4-bit nibbles
 } block_q4_0;
 
+#define CHECK_CL(err, msg) do { \
+    if (err != CL_SUCCESS) { \
+        fprintf(stderr, "FATAL OpenCL Error at %s:%d: %s (code %d)\n", __FILE__, __LINE__, msg, err); \
+        exit(1); \
+    } \
+} while (0)
+
 static inline double get_time_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -171,7 +178,7 @@ static inline double event_duration_us(cl_event ev) {
 
 int main() {
     printf("===================================================================\n");
-    printf("  Resident SwiGLU FFN Engine on Kepler GT 750M vs Haswell AVX2\n");
+    printf("  Resident SwiGLU FFN Engine on Kepler GT 750M vs Haswell AVX2 (v2)\n");
     printf("  Architecture: Qwen2.5-Coder-1.5B (D=%d, M=%d)\n", D_MODEL, D_FFN);
     printf("===================================================================\n");
 
@@ -180,10 +187,10 @@ int main() {
     cl_int err;
 
     err = clGetPlatformIDs(1, &platform, NULL);
-    if (err != CL_SUCCESS) { printf("Failed platform: %d\n", err); return 1; }
+    CHECK_CL(err, "clGetPlatformIDs");
 
     err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
-    if (err != CL_SUCCESS) { printf("Failed GPU device: %d\n", err); return 1; }
+    CHECK_CL(err, "clGetDeviceIDs");
 
     char dev_name[128];
     clGetDeviceInfo(device, CL_DEVICE_NAME, sizeof(dev_name), dev_name, NULL);
@@ -191,12 +198,16 @@ int main() {
     printf("CPU OpenMP Threads: %d threads\n", omp_get_max_threads());
 
     cl_context ctx = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
+    CHECK_CL(err, "clCreateContext");
+
     cl_command_queue queue = clCreateCommandQueue(ctx, device, CL_QUEUE_PROFILING_ENABLE, &err);
+    CHECK_CL(err, "clCreateCommandQueue");
 
     char *src = load_kernel_source("kernel_ffn_swiglu.cl");
     if (!src) { return 1; }
 
     cl_program prog = clCreateProgramWithSource(ctx, 1, (const char**)&src, NULL, &err);
+    CHECK_CL(err, "clCreateProgramWithSource");
     free(src);
 
     err = clBuildProgram(prog, 1, &device, "-cl-std=CL1.2 -cl-mad-enable", NULL, NULL);
@@ -210,9 +221,13 @@ int main() {
     printf("✓ OpenCL SwiGLU Program built successfully!\n\n");
 
     cl_kernel k_rmsnorm  = clCreateKernel(prog, "kernel_rmsnorm", &err);
+    CHECK_CL(err, "clCreateKernel rmsnorm");
     cl_kernel k_gemv     = clCreateKernel(prog, "gemv_q4_0_dual_block", &err);
+    CHECK_CL(err, "clCreateKernel gemv");
     cl_kernel k_swiglu   = clCreateKernel(prog, "kernel_swiglu", &err);
+    CHECK_CL(err, "clCreateKernel swiglu");
     cl_kernel k_residual = clCreateKernel(prog, "kernel_residual_add", &err);
+    CHECK_CL(err, "clCreateKernel residual");
 
     // Memory footprints
     int nb_gate = D_MODEL / QK4_0; // 48 blocks
@@ -238,7 +253,6 @@ int main() {
     block_q4_0 *h_W_down = (block_q4_0*)malloc(w_down_bytes);
     float *h_gamma = (float*)malloc(gamma_bytes);
 
-    // Synthetic weights initialization
     for (size_t i = 0; i < (size_t)D_FFN * nb_gate; i++) {
         h_W_gate[i].d = float_to_fp16(0.015f + (float)(rand() % 100) * 0.0001f);
         h_W_up[i].d   = float_to_fp16(0.012f + (float)(rand() % 100) * 0.0001f);
@@ -257,7 +271,6 @@ int main() {
         h_gamma[i] = 1.0f + ((float)(rand() % 100) - 50.0f) * 0.002f;
     }
 
-    // Host token activations
     float *h_x = (float*)malloc(D_MODEL * sizeof(float));
     float *h_z_cpu = (float*)malloc(D_MODEL * sizeof(float));
     float *h_g_cpu = (float*)malloc(D_FFN * sizeof(float));
@@ -279,24 +292,34 @@ int main() {
 
     // Create Resident GPU Buffers
     cl_mem d_W_gate = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, w_gate_bytes, h_W_gate, &err);
+    CHECK_CL(err, "Buffer W_gate");
     cl_mem d_W_up   = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, w_up_bytes, h_W_up, &err);
+    CHECK_CL(err, "Buffer W_up");
     cl_mem d_W_down = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, w_down_bytes, h_W_down, &err);
+    CHECK_CL(err, "Buffer W_down");
     cl_mem d_gamma  = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, gamma_bytes, h_gamma, &err);
+    CHECK_CL(err, "Buffer gamma");
 
     // Working Buffers in VRAM
     cl_mem d_x     = clCreateBuffer(ctx, CL_MEM_READ_ONLY, D_MODEL * sizeof(float), NULL, &err);
+    CHECK_CL(err, "Buffer d_x");
     cl_mem d_z     = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_MODEL * sizeof(float), NULL, &err);
+    CHECK_CL(err, "Buffer d_z");
     cl_mem d_g     = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_FFN * sizeof(float), NULL, &err);
+    CHECK_CL(err, "Buffer d_g");
     cl_mem d_u     = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_FFN * sizeof(float), NULL, &err);
+    CHECK_CL(err, "Buffer d_u");
     cl_mem d_h     = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_FFN * sizeof(float), NULL, &err);
+    CHECK_CL(err, "Buffer d_h");
     cl_mem d_ydown = clCreateBuffer(ctx, CL_MEM_READ_WRITE, D_MODEL * sizeof(float), NULL, &err);
+    CHECK_CL(err, "Buffer d_ydown");
     cl_mem d_y     = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, D_MODEL * sizeof(float), NULL, &err);
+    CHECK_CL(err, "Buffer d_y");
 
-    // Work-group configurations
     size_t local_norm = 128;
     size_t global_norm = 128;
 
-    size_t local_warp = 128; // 4 warps
+    size_t local_warp = 128;
     size_t global_gate = ((D_FFN + 3) / 4) * local_warp;
     size_t global_down = ((D_MODEL + 3) / 4) * local_warp;
 
@@ -311,7 +334,7 @@ int main() {
     int m_val = D_FFN;
 
     // [1] Warmup and Benchmark CPU Reference
-    printf("⏱️ [1/3] Benchmarking CPU Reference Pipeline (AVX2 + OpenMP 8 threads)...\n");
+    printf("⏱️ [1/4] Benchmarking CPU Reference Pipeline (AVX2 + OpenMP 8 threads)...\n");
     for (int i = 0; i < 3; i++) {
         cpu_swiglu_pipeline(h_x, h_gamma, h_W_gate, h_W_up, h_W_down, h_z_cpu, h_g_cpu, h_u_cpu, h_h_cpu, h_ydown_cpu, h_y_cpu);
     }
@@ -325,44 +348,43 @@ int main() {
     printf("  ✓ CPU Total SwiGLU Time: %8.2f ms\n\n", cpu_avg_ms);
 
     // [2] Warmup GPU
-    printf("⏱️ [2/3] Warming up GPU Pipeline...\n");
+    printf("⏱️ [2/4] Warming up GPU Pipeline...\n");
     for (int i = 0; i < 5; i++) {
         clEnqueueWriteBuffer(queue, d_x, CL_FALSE, 0, D_MODEL * sizeof(float), h_x, 0, NULL, NULL);
-        // 1. RMSNorm
         clSetKernelArg(k_rmsnorm, 0, sizeof(cl_mem), &d_x);
         clSetKernelArg(k_rmsnorm, 1, sizeof(cl_mem), &d_gamma);
         clSetKernelArg(k_rmsnorm, 2, sizeof(cl_mem), &d_z);
         clSetKernelArg(k_rmsnorm, 3, sizeof(int), &d_val);
         clSetKernelArg(k_rmsnorm, 4, sizeof(float), &eps);
         clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &global_norm, &local_norm, 0, NULL, NULL);
-        // 2. Gate
+
         clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_gate);
         clSetKernelArg(k_gemv, 1, sizeof(cl_mem), &d_z);
         clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_g);
         clSetKernelArg(k_gemv, 3, sizeof(int), &m_val);
         clSetKernelArg(k_gemv, 4, sizeof(int), &d_val);
         clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
-        // 3. Up
+
         clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_up);
         clSetKernelArg(k_gemv, 1, sizeof(cl_mem), &d_z);
         clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_u);
         clSetKernelArg(k_gemv, 3, sizeof(int), &m_val);
         clSetKernelArg(k_gemv, 4, sizeof(int), &d_val);
         clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
-        // 4. SwiGLU
+
         clSetKernelArg(k_swiglu, 0, sizeof(cl_mem), &d_g);
         clSetKernelArg(k_swiglu, 1, sizeof(cl_mem), &d_u);
         clSetKernelArg(k_swiglu, 2, sizeof(cl_mem), &d_h);
         clSetKernelArg(k_swiglu, 3, sizeof(int), &m_val);
         clEnqueueNDRangeKernel(queue, k_swiglu, 1, NULL, &global_swiglu, &local_swiglu, 0, NULL, NULL);
-        // 5. Down
+
         clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_down);
         clSetKernelArg(k_gemv, 1, sizeof(cl_mem), &d_h);
         clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_ydown);
         clSetKernelArg(k_gemv, 3, sizeof(int), &d_val);
         clSetKernelArg(k_gemv, 4, sizeof(int), &m_val);
         clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_down, &local_warp, 0, NULL, NULL);
-        // 6. Residual
+
         clSetKernelArg(k_residual, 0, sizeof(cl_mem), &d_x);
         clSetKernelArg(k_residual, 1, sizeof(cl_mem), &d_ydown);
         clSetKernelArg(k_residual, 2, sizeof(cl_mem), &d_y);
@@ -372,35 +394,50 @@ int main() {
     }
     clFinish(queue);
 
-    // [3] Benchmark GPU Pipeline with Detailed Profiling Breakdown
-    printf("⏱️ [3/3] Benchmarking 100 Iterations on GPU (GT 750M via Mesa Rusticl)...\n");
+    // [3] Benchmark Clean Request Latency (Pure Host Wall-Clock without profiling overhead)
+    printf("⏱️ [3/4] Measuring Pure Host Request Latency (100 runs, no event profiling calls in loop)...\n");
+    double t_req_start = get_time_us();
+    for (int i = 0; i < ITERS; i++) {
+        cl_event ev_done;
+        clEnqueueWriteBuffer(queue, d_x, CL_FALSE, 0, D_MODEL * sizeof(float), h_x, 0, NULL, NULL);
+        clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &global_norm, &local_norm, 0, NULL, NULL);
+        clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
+        clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_up);
+        clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_u);
+        clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_gate, &local_warp, 0, NULL, NULL);
+        clEnqueueNDRangeKernel(queue, k_swiglu, 1, NULL, &global_swiglu, &local_swiglu, 0, NULL, NULL);
+        clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_down);
+        clSetKernelArg(k_gemv, 1, sizeof(cl_mem), &d_h);
+        clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_ydown);
+        clSetKernelArg(k_gemv, 3, sizeof(int), &d_val);
+        clSetKernelArg(k_gemv, 4, sizeof(int), &m_val);
+        clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_down, &local_warp, 0, NULL, NULL);
+        clEnqueueNDRangeKernel(queue, k_residual, 1, NULL, &global_resid, &local_resid, 0, NULL, NULL);
+        clEnqueueReadBuffer(queue, d_y, CL_FALSE, 0, D_MODEL * sizeof(float), h_y_gpu, 0, NULL, &ev_done);
+        clWaitForEvents(1, &ev_done);
+        clReleaseEvent(ev_done);
+        // Reset args for next iteration
+        clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_gate);
+        clSetKernelArg(k_gemv, 1, sizeof(cl_mem), &d_z);
+        clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_g);
+        clSetKernelArg(k_gemv, 3, sizeof(int), &m_val);
+        clSetKernelArg(k_gemv, 4, sizeof(int), &d_val);
+    }
+    double t_req_end = get_time_us();
+    double pure_request_avg_ms = (t_req_end - t_req_start) / (ITERS * 1000.0);
+    printf("  ✓ Pure GPU Request Wall-Clock Time: %8.2f ms\n\n", pure_request_avg_ms);
 
-    double t_pcie_up_total = 0.0;
-    double t_norm_total    = 0.0;
-    double t_gate_total    = 0.0;
-    double t_up_total      = 0.0;
-    double t_swiglu_total  = 0.0;
-    double t_down_total    = 0.0;
-    double t_resid_total   = 0.0;
-    double t_pcie_dn_total = 0.0;
-
-    double t_host_total_start = get_time_us();
+    // [4] Detailed Profiling Breakdown (Events measured separately)
+    printf("⏱️ [4/4] Profiling Stage Breakdown (100 runs)...\n");
+    double t_pcie_up_total = 0.0, t_norm_total = 0.0, t_gate_total = 0.0, t_up_total = 0.0;
+    double t_swiglu_total = 0.0, t_down_total = 0.0, t_resid_total = 0.0, t_pcie_dn_total = 0.0;
 
     for (int i = 0; i < ITERS; i++) {
         cl_event ev_up, ev_norm, ev_gate, ev_up_gemv, ev_swiglu, ev_down, ev_resid, ev_dn;
 
-        // Stage 0: PCIe Upload x (6 KB)
         clEnqueueWriteBuffer(queue, d_x, CL_FALSE, 0, D_MODEL * sizeof(float), h_x, 0, NULL, &ev_up);
-
-        // Stage 1: RMSNorm
-        clSetKernelArg(k_rmsnorm, 0, sizeof(cl_mem), &d_x);
-        clSetKernelArg(k_rmsnorm, 1, sizeof(cl_mem), &d_gamma);
-        clSetKernelArg(k_rmsnorm, 2, sizeof(cl_mem), &d_z);
-        clSetKernelArg(k_rmsnorm, 3, sizeof(int), &d_val);
-        clSetKernelArg(k_rmsnorm, 4, sizeof(float), &eps);
         clEnqueueNDRangeKernel(queue, k_rmsnorm, 1, NULL, &global_norm, &local_norm, 0, NULL, &ev_norm);
 
-        // Stage 2: Gate GEMV (8960x1536)
         clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_gate);
         clSetKernelArg(k_gemv, 1, sizeof(cl_mem), &d_z);
         clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_g);
@@ -408,7 +445,6 @@ int main() {
         clSetKernelArg(k_gemv, 4, sizeof(int), &d_val);
         clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_gate, &local_warp, 0, NULL, &ev_gate);
 
-        // Stage 3: Up GEMV (8960x1536)
         clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_up);
         clSetKernelArg(k_gemv, 1, sizeof(cl_mem), &d_z);
         clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_u);
@@ -416,14 +452,8 @@ int main() {
         clSetKernelArg(k_gemv, 4, sizeof(int), &d_val);
         clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_gate, &local_warp, 0, NULL, &ev_up_gemv);
 
-        // Stage 4: SwiGLU Activation
-        clSetKernelArg(k_swiglu, 0, sizeof(cl_mem), &d_g);
-        clSetKernelArg(k_swiglu, 1, sizeof(cl_mem), &d_u);
-        clSetKernelArg(k_swiglu, 2, sizeof(cl_mem), &d_h);
-        clSetKernelArg(k_swiglu, 3, sizeof(int), &m_val);
         clEnqueueNDRangeKernel(queue, k_swiglu, 1, NULL, &global_swiglu, &local_swiglu, 0, NULL, &ev_swiglu);
 
-        // Stage 5: Down GEMV (1536x8960)
         clSetKernelArg(k_gemv, 0, sizeof(cl_mem), &d_W_down);
         clSetKernelArg(k_gemv, 1, sizeof(cl_mem), &d_h);
         clSetKernelArg(k_gemv, 2, sizeof(cl_mem), &d_ydown);
@@ -431,17 +461,9 @@ int main() {
         clSetKernelArg(k_gemv, 4, sizeof(int), &m_val);
         clEnqueueNDRangeKernel(queue, k_gemv, 1, NULL, &global_down, &local_warp, 0, NULL, &ev_down);
 
-        // Stage 6: Residual Add
-        clSetKernelArg(k_residual, 0, sizeof(cl_mem), &d_x);
-        clSetKernelArg(k_residual, 1, sizeof(cl_mem), &d_ydown);
-        clSetKernelArg(k_residual, 2, sizeof(cl_mem), &d_y);
-        clSetKernelArg(k_residual, 3, sizeof(int), &d_val);
         clEnqueueNDRangeKernel(queue, k_residual, 1, NULL, &global_resid, &local_resid, 0, NULL, &ev_resid);
-
-        // Stage 7: PCIe Download y (6 KB)
         clEnqueueReadBuffer(queue, d_y, CL_FALSE, 0, D_MODEL * sizeof(float), h_y_gpu, 0, NULL, &ev_dn);
 
-        // Synchronize on the final read event ONLY
         clWaitForEvents(1, &ev_dn);
 
         t_pcie_up_total += event_duration_us(ev_up);
@@ -462,27 +484,38 @@ int main() {
         clReleaseEvent(ev_resid);
         clReleaseEvent(ev_dn);
     }
-    double t_host_total_end = get_time_us();
-    double host_wall_avg_ms = (t_host_total_end - t_host_total_start) / (ITERS * 1000.0);
 
-    // Read intermediate buffers for strict stage-by-stage validation
+    // Read intermediate buffers for strict validation
     clEnqueueReadBuffer(queue, d_z, CL_TRUE, 0, D_MODEL * sizeof(float), h_z_gpu, 0, NULL, NULL);
     clEnqueueReadBuffer(queue, d_g, CL_TRUE, 0, D_FFN * sizeof(float), h_g_gpu, 0, NULL, NULL);
     clEnqueueReadBuffer(queue, d_u, CL_TRUE, 0, D_FFN * sizeof(float), h_u_gpu, 0, NULL, NULL);
     clEnqueueReadBuffer(queue, d_h, CL_TRUE, 0, D_FFN * sizeof(float), h_h_gpu, 0, NULL, NULL);
     clEnqueueReadBuffer(queue, d_ydown, CL_TRUE, 0, D_MODEL * sizeof(float), h_ydown_gpu, 0, NULL, NULL);
 
-    // Strict numerical verification
+    // Strict numerical verification with atol + rtol
+    const double atol = 1e-4;
+    const double rtol = 1e-3;
+
     double max_err_z = 0.0, max_err_g = 0.0, max_err_u = 0.0, max_err_h = 0.0, max_err_ydown = 0.0, max_err_y = 0.0;
     for (int i = 0; i < D_MODEL; i++) {
+        if (!isfinite(h_y_gpu[i]) || !isfinite(h_y_cpu[i])) {
+            fprintf(stderr, "FATAL: Non-finite value in y at index %d!\n", i);
+            exit(1);
+        }
         double diff = fabs((double)h_z_cpu[i] - (double)h_z_gpu[i]);
         if (diff > max_err_z) max_err_z = diff;
         diff = fabs((double)h_ydown_cpu[i] - (double)h_ydown_gpu[i]);
         if (diff > max_err_ydown) max_err_ydown = diff;
         diff = fabs((double)h_y_cpu[i] - (double)h_y_gpu[i]);
         if (diff > max_err_y) max_err_y = diff;
+        double tol = atol + rtol * fabs((double)h_y_cpu[i]);
+        if (diff > tol) {
+            fprintf(stderr, "FATAL: y[%d] error %e exceeded tolerance %e!\n", i, diff, tol);
+            exit(1);
+        }
     }
     for (int i = 0; i < D_FFN; i++) {
+        if (!isfinite(h_h_gpu[i])) { fprintf(stderr, "FATAL: Non-finite in h[%d]!\n", i); exit(1); }
         double diff = fabs((double)h_g_cpu[i] - (double)h_g_gpu[i]);
         if (diff > max_err_g) max_err_g = diff;
         diff = fabs((double)h_u_cpu[i] - (double)h_u_gpu[i]);
@@ -507,15 +540,14 @@ int main() {
     double gpu_full_e2e_ms   = (t_pcie_up_total + t_norm_total + t_gate_total + t_up_total + t_swiglu_total + t_down_total + t_resid_total + t_pcie_dn_total) / (ITERS * 1000.0);
     printf("  • GPU Pure Compute Time:           %8.2f ms\n", gpu_device_sum_ms);
     printf("  • GPU Pipeline (incl. PCIe I/O):   %8.2f ms\n", gpu_full_e2e_ms);
-    printf("  • Host Wall-Clock E2E Time:        %8.2f ms\n", host_wall_avg_ms);
+    printf("  • Pure GPU Request Latency:        %8.2f ms (uninstrumented host E2E)\n", pure_request_avg_ms);
     printf("  • CPU Reference (AVX2 8 threads):  %8.2f ms\n", cpu_avg_ms);
     printf("-------------------------------------------------------------------\n");
     printf("  🏆 SPEEDUP (CPU vs GPU Compute):   %8.2fx %s\n", cpu_avg_ms / gpu_device_sum_ms, (cpu_avg_ms > gpu_device_sum_ms) ? "🚀 (GPU Faster!)" : "🐢 (CPU Faster)");
-    printf("  🏆 SPEEDUP (CPU vs GPU Host E2E):  %8.2fx %s\n", cpu_avg_ms / host_wall_avg_ms, (cpu_avg_ms > host_wall_avg_ms) ? "🚀 (GPU Faster!)" : "🐢 (CPU Faster)");
-    printf("  • Final Max Absolute Error:        %.6e\n", max_err_y);
+    printf("  🏆 SPEEDUP (CPU vs Pure Request):  %8.2fx %s\n", cpu_avg_ms / pure_request_avg_ms, (cpu_avg_ms > pure_request_avg_ms) ? "🚀 (GPU Faster!)" : "🐢 (CPU Faster)");
+    printf("  • Final Max Absolute Error:        %.6e (PASSED atol+rtol)\n", max_err_y);
     printf("===================================================================\n");
 
-    // Clean up
     clReleaseMemObject(d_W_gate);
     clReleaseMemObject(d_W_up);
     clReleaseMemObject(d_W_down);
