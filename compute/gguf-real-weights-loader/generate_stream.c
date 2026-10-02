@@ -723,6 +723,11 @@ int main(int argc, char **argv) {
         int best_tok = 0;
         float best_val = -1e30f;
         for (int i = 0; i < VOCAB_SIZE; i++) {
+            if (!isfinite(h_logits[i])) {
+                fprintf(stderr, "\nFATAL: Non-finite logit at gen=%d, pos=%d, token_id=%d (val=%f)\n",
+                        gen, cur_pos, i, h_logits[i]);
+                exit(1);
+            }
             if (h_logits[i] > best_val) {
                 best_val = h_logits[i];
                 best_tok = i;
@@ -737,9 +742,9 @@ int main(int argc, char **argv) {
 
         print_token_piece(vocab_tokens[best_tok]);
         generated_count++;
+        cur_pos++;
 
-        if (cur_pos >= T_MAX) {
-            fprintf(stderr, "\n[Context Limit T_MAX reached: Stopping Generation]\n");
+        if (generated_count >= max_new_tokens || cur_pos >= T_MAX) {
             break;
         }
 
@@ -748,7 +753,7 @@ int main(int argc, char **argv) {
         clEnqueueWriteBuffer(queue, ws.state, CL_TRUE, 0, sizeof(float) * D_MODEL, h_embd, 0, NULL, NULL);
 
         for (int l = 0; l < N_LAYERS; l++) {
-            gpu_decoder_layer_step(queue, &kernels[l], &w_dev[l], &kv_dev[l], &ws, cur_pos, cur_pos + 1);
+            gpu_decoder_layer_step(queue, &kernels[l], &w_dev[l], &kv_dev[l], &ws, cur_pos - 1, cur_pos);
         }
 
         int D = D_MODEL;
@@ -778,10 +783,9 @@ int main(int argc, char **argv) {
         double step_ms = (t_step_1 - t_step_0) / 1000.0;
         total_gen_time_ms += step_ms;
         fprintf(stderr, "[Gen %2d | pos=%2d | tok=%-5d '%-8s' | logit=%7.4f | lat=%6.2f ms]\n",
-                gen + 1, cur_pos, best_tok, vocab_tokens[best_tok], best_val, step_ms);
-
-        cur_pos++;
+                gen + 1, cur_pos - 1, best_tok, vocab_tokens[best_tok], best_val, step_ms);
     }
+
 
     fprintf(stderr, "\n========================================================================================\n");
     fprintf(stderr, " GENERATION BENCHMARK SUMMARY (GT 750M Physical Hardware):\n");
