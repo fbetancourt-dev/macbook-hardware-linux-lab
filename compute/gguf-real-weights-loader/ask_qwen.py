@@ -338,11 +338,13 @@ def main():
     s.close()
 
     # Active verification: check if server loaded the same model weights as on disk
-    m_srv_sha = re.search(r'model_sha256=([0-9a-fA-F]+)', st)
-    if m_srv_sha:
+    m_srv_sha = re.search(r'model_sha256=([0-9a-fA-F]{64})', st)
+    if not m_srv_sha:
+        print("⚠️ Advertencia: No se pudo verificar una huella SHA-256 válida (64 hex) del modelo en el daemon.", file=sys.stderr)
+    else:
         srv_sha = m_srv_sha.group(1).lower()
         cli_sha = get_model_sha256().lower()
-        if srv_sha != cli_sha and srv_sha != "unknown":
+        if srv_sha != cli_sha:
             print("❌ Error crítico: El modelo GGUF en disco ha cambiado respecto al residente en VRAM.", file=sys.stderr)
             print(f"   Disco: {cli_sha}\n   VRAM:  {srv_sha}", file=sys.stderr)
             print("   Reinicia el servidor para cargar los nuevos pesos: RUSTICL_ENABLE=nouveau ./qwen_server", file=sys.stderr)

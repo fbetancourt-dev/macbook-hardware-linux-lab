@@ -65,7 +65,7 @@ Full pipeline execution with official Qwen2.5-Coder-1.5B weights: 28 Decoder Lay
 
 ### 4. Phase C: Real-Time Streaming Autoregressive Generator (`generate_stream`)
 
-Complete end-to-end multi-token prefill and autoregressive greedy token generation running 100% resident on the **NVIDIA GeForce GT 750M** Kepler GPU (384 cores, 2 GB VRAM) using real weights from **Qwen2.5-Coder-1.5B**.
+Complete end-to-end multi-token prefill and autoregressive greedy token generation running with 28 layers, LM head, and KV cache resident on the **NVIDIA GeForce GT 750M** Kepler GPU (384 cores, 2 GB VRAM; embeddings prepared on CPU host) using real weights from **Qwen2.5-Coder-1.5B**.
 
 - **Prompt:** `"def add(a, b):\n    return "` (9 tokens prefilled: `[750, 912, 2877, 11, 293, 982, 262, 470, 220]`)
 - **Prefill Latency (TTFT):** $6405.55\text{ ms}$ (Average $\approx 711\text{ ms}$ per prompt token).
@@ -87,7 +87,7 @@ Complete end-to-end multi-token prefill and autoregressive greedy token generati
 | **`llama-completion` (llama.cpp official)** | **Haswell i7-4870HQ (8 threads AVX2)** | $2217.91\text{ ms}$ ($246.4\text{ ms/tok}$) | **23 runs** | **$2143.42\text{ ms/run}$** | **$0.47\text{ t/s}$** | **Token-by-token Identical** |
 
 > [!NOTE]
-> **Independent Cross-Validation:** The output token sequence produced by our GT 750M Kepler engine is **100% bit-for-bit and token-for-token identical** to official `llama.cpp` (`llama-completion`). On generation / decode passes, our GT 750M is **$2.23\times$ faster** than official `llama.cpp` running on 8 CPU threads ($961\text{ ms}$ vs $2143\text{ ms}$).
+> **Independent Cross-Validation:** In this specific 9-prompt / 23-decode benchmark run, the output token sequence produced by our GT 750M Kepler engine is token-for-token identical to official `llama.cpp` (`llama-completion`). On decode passes for this test prompt, our GT 750M achieves **$2.23\times$ faster** decode than official `llama.cpp` running on 8 CPU threads ($961\text{ ms}$ vs $2143\text{ ms}$).
 
 #### Edge Case & Termination Verification:
 - **`max_new_tokens = 0`:** Exits immediately with 0 tokens generated and 0 decode forwards executed. No uninitialized buffer access.
@@ -126,7 +126,7 @@ A high-performance persistent daemon resident in GT 750M VRAM paired with a tran
 │   • 1110 MB / 2048 MB Resident in GT 750M VRAM                         │
 │   • 28 Layers (Q4_0) + Output Norm (FP32) + LM Head (Q6_K) + KV Cache  │
 │   • Input embeddings prepared on CPU host & transferred via PCIe       │
-│   • Frozen Base KV Cache (SET_BASE prefilled once, zero repeat cost)   │
+│   • Frozen Base KV Cache (SET_BASE prefilled once, avoids repeat)      │
 │   • Streaming token generation directly to socket                      │
 │   • Lifecycle States: UNINITIALIZED ➔ REBUILDING ➔ READY               │
 │   • Guards: SO_RCVTIMEO (5s), RAW_QUERY guard, context overflow check  │
@@ -139,6 +139,7 @@ A high-performance persistent daemon resident in GT 750M VRAM paired with a tran
   ```
   STATUS OK model=<path> model_sha256=<hash> t_max=4096 base_pos=218 base_hash=0x6204c50c4b83d6ac base_generation=1 memory_state=READY vram_mb=1110 (weights_mb=850 kv_cache_mb=224 workspace_mb=36)
   ```
+  *(Note: `vram_mb=1110` represents the static model budget allocated on the GPU for weights, LM head, KV cache, and workspace buffers, rather than dynamic OS telemetry).*
 - **`SET_BASE <t1,t2,...>`:** Prefills system prompt tokens into KV cache starting at `pos=0` and freezes them as base context. Transitions state from `UNINITIALIZED` $\to$ `REBUILDING` $\to$ `READY`.
 - **`QUERY <max_new> <t1,t2,...>`:** Appends user tokens after `base_pos` without touching frozen base cache, evaluates user prompt, and streams generated tokens one by one until `<|im_end|>` or `max_new` limit.
 - **`RAW_QUERY <max_new> <t1,t2,...>`:** Evaluates prompt from `cur_pos=0` (only permitted when no base context is active).
