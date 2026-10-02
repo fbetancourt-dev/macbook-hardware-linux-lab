@@ -431,17 +431,18 @@ static void gpu_decoder_layer_step(
     size_t l_swiglu = 128, g_swiglu = ((D_FFN + 3) / 4) * 128;
     size_t l_down = 128, g_down = ((D_MODEL + 3) / 4) * 128;
 
-    clEnqueueNDRangeKernel(queue, k->k_rmsnorm_attn, 1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_qkv_gemv,     1, NULL, &g_qkv,     &l_qkv,     0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_rope_kv,      1, NULL, &g_rope,    &l_rope,    0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_scores,       2, NULL, g_scores,   l_scores,   0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_softmax,      1, NULL, &g_soft,    &l_soft,    0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_pv_combine,   2, NULL, g_pv,       l_pv,       0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_pv_reduce,    1, NULL, &g_red,     &l_red,     0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_wo_residual,  1, NULL, &g_wo,      &l_wo,      0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_rmsnorm_ffn,  1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_swiglu_fused, 1, NULL, &g_swiglu,  &l_swiglu,  0, NULL, NULL);
-    clEnqueueNDRangeKernel(queue, k->k_down_res,     1, NULL, &g_down,    &l_down,    0, NULL, NULL);
+    cl_int err;
+    err = clEnqueueNDRangeKernel(queue, k->k_rmsnorm_attn, 1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, NULL); CHECK_CL(err, "k_rmsnorm_attn");
+    err = clEnqueueNDRangeKernel(queue, k->k_qkv_gemv,     1, NULL, &g_qkv,     &l_qkv,     0, NULL, NULL); CHECK_CL(err, "k_qkv_gemv");
+    err = clEnqueueNDRangeKernel(queue, k->k_rope_kv,      1, NULL, &g_rope,    &l_rope,    0, NULL, NULL); CHECK_CL(err, "k_rope_kv");
+    err = clEnqueueNDRangeKernel(queue, k->k_scores,       2, NULL, g_scores,   l_scores,   0, NULL, NULL); CHECK_CL(err, "k_scores");
+    err = clEnqueueNDRangeKernel(queue, k->k_softmax,      1, NULL, &g_soft,    &l_soft,    0, NULL, NULL); CHECK_CL(err, "k_softmax");
+    err = clEnqueueNDRangeKernel(queue, k->k_pv_combine,   2, NULL, g_pv,       l_pv,       0, NULL, NULL); CHECK_CL(err, "k_pv_combine");
+    err = clEnqueueNDRangeKernel(queue, k->k_pv_reduce,    1, NULL, &g_red,     &l_red,     0, NULL, NULL); CHECK_CL(err, "k_pv_reduce");
+    err = clEnqueueNDRangeKernel(queue, k->k_wo_residual,  1, NULL, &g_wo,      &l_wo,      0, NULL, NULL); CHECK_CL(err, "k_wo_residual");
+    err = clEnqueueNDRangeKernel(queue, k->k_rmsnorm_ffn,  1, NULL, &g_rmsnorm, &l_rmsnorm, 0, NULL, NULL); CHECK_CL(err, "k_rmsnorm_ffn");
+    err = clEnqueueNDRangeKernel(queue, k->k_swiglu_fused, 1, NULL, &g_swiglu,  &l_swiglu,  0, NULL, NULL); CHECK_CL(err, "k_swiglu_fused");
+    err = clEnqueueNDRangeKernel(queue, k->k_down_res,     1, NULL, &g_down,    &l_down,    0, NULL, NULL); CHECK_CL(err, "k_down_res");
 }
 
 int main(int argc, char **argv) {
@@ -715,17 +716,26 @@ int main(int argc, char **argv) {
     fprintf(stderr, "========================================================================================\n");
 
     int max_new_tokens = 24;
-    int cur_pos = n_prompt;
+    if (argc > 1) {
+        max_new_tokens = atoi(argv[1]);
+        if (max_new_tokens < 0) max_new_tokens = 0;
+    }
+
+    int next_input_pos = n_prompt;
     double total_gen_time_ms = 0.0;
     int generated_count = 0;
+    int decode_forward_count = 0;
 
     for (int gen = 0; gen < max_new_tokens; gen++) {
+        if (argc > 2 && strcmp(argv[2], "--test-nan") == 0 && gen == 0) {
+            h_logits[42] = 0.0f / 0.0f; // Test NaN injection
+        }
         int best_tok = 0;
         float best_val = -1e30f;
         for (int i = 0; i < VOCAB_SIZE; i++) {
             if (!isfinite(h_logits[i])) {
                 fprintf(stderr, "\nFATAL: Non-finite logit at gen=%d, pos=%d, token_id=%d (val=%f)\n",
-                        gen, cur_pos, i, h_logits[i]);
+                        gen, next_input_pos, i, h_logits[i]);
                 exit(1);
             }
             if (h_logits[i] > best_val) {
@@ -742,18 +752,22 @@ int main(int argc, char **argv) {
 
         print_token_piece(vocab_tokens[best_tok]);
         generated_count++;
-        cur_pos++;
 
-        if (generated_count >= max_new_tokens || cur_pos >= T_MAX) {
+        if (generated_count >= max_new_tokens) {
+            break;
+        }
+        if (next_input_pos >= T_MAX) {
+            fprintf(stderr, "\n[Notice: Reached max context length %d]\n", T_MAX);
             break;
         }
 
         double t_step_0 = get_time_us();
         get_token_embedding(fd, off_embd, best_tok, h_embd);
-        clEnqueueWriteBuffer(queue, ws.state, CL_TRUE, 0, sizeof(float) * D_MODEL, h_embd, 0, NULL, NULL);
+        err = clEnqueueWriteBuffer(queue, ws.state, CL_TRUE, 0, sizeof(float) * D_MODEL, h_embd, 0, NULL, NULL);
+        CHECK_CL(err, "write ws.state");
 
         for (int l = 0; l < N_LAYERS; l++) {
-            gpu_decoder_layer_step(queue, &kernels[l], &w_dev[l], &kv_dev[l], &ws, cur_pos - 1, cur_pos);
+            gpu_decoder_layer_step(queue, &kernels[l], &w_dev[l], &kv_dev[l], &ws, next_input_pos, next_input_pos + 1);
         }
 
         int D = D_MODEL;
@@ -764,7 +778,8 @@ int main(int argc, char **argv) {
         clSetKernelArg(k_output_norm, 3, sizeof(int), &D);
         clSetKernelArg(k_output_norm, 4, sizeof(float), &eps);
         size_t g_norm = 128, l_norm = 128;
-        clEnqueueNDRangeKernel(queue, k_output_norm, 1, NULL, &g_norm, &l_norm, 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, k_output_norm, 1, NULL, &g_norm, &l_norm, 0, NULL, NULL);
+        CHECK_CL(err, "k_output_norm");
 
         int M_vocab = VOCAB_SIZE;
         int K_dim = D_MODEL;
@@ -775,15 +790,19 @@ int main(int argc, char **argv) {
         clSetKernelArg(k_lm_head, 4, sizeof(int), &K_dim);
         size_t l_head = 128;
         size_t g_head = ((VOCAB_SIZE + 3) / 4) * 128;
-        clEnqueueNDRangeKernel(queue, k_lm_head, 1, NULL, &g_head, &l_head, 0, NULL, NULL);
+        err = clEnqueueNDRangeKernel(queue, k_lm_head, 1, NULL, &g_head, &l_head, 0, NULL, NULL);
+        CHECK_CL(err, "k_lm_head");
 
-        clEnqueueReadBuffer(queue, d_logits, CL_TRUE, 0, sizeof(float) * VOCAB_SIZE, h_logits, 0, NULL, NULL);
+        err = clEnqueueReadBuffer(queue, d_logits, CL_TRUE, 0, sizeof(float) * VOCAB_SIZE, h_logits, 0, NULL, NULL);
+        CHECK_CL(err, "read d_logits");
         double t_step_1 = get_time_us();
 
         double step_ms = (t_step_1 - t_step_0) / 1000.0;
         total_gen_time_ms += step_ms;
+        decode_forward_count++;
         fprintf(stderr, "[Gen %2d | pos=%2d | tok=%-5d '%-8s' | logit=%7.4f | lat=%6.2f ms]\n",
-                gen + 1, cur_pos - 1, best_tok, vocab_tokens[best_tok], best_val, step_ms);
+                gen + 1, next_input_pos, best_tok, vocab_tokens[best_tok], best_val, step_ms);
+        next_input_pos++;
     }
 
 
@@ -792,8 +811,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "========================================================================================\n");
     fprintf(stderr, "  Prompt Tokens Processed:      %d tokens\n", n_prompt);
     fprintf(stderr, "  Generated Tokens:             %d tokens\n", generated_count);
-    fprintf(stderr, "  Average Decode Latency:       %.2f ms/token\n", (generated_count > 0) ? total_gen_time_ms / generated_count : 0.0);
-    fprintf(stderr, "  Autoregressive Generation:    %.2f tokens/second\n", (total_gen_time_ms > 0) ? (generated_count * 1000.0) / total_gen_time_ms : 0.0);
+    fprintf(stderr, "  Decode Forward Passes:        %d passes\n", decode_forward_count);
+    if (decode_forward_count > 0) {
+        fprintf(stderr, "  Mean Decode Forward Latency:  %.2f ms/pass\n", total_gen_time_ms / decode_forward_count);
+        fprintf(stderr, "  Decode Forward Rate:          %.2f passes/sec (t/s)\n", (decode_forward_count * 1000.0) / total_gen_time_ms);
+    } else {
+        fprintf(stderr, "  Mean Decode Forward Latency:  N/A (no decode forward executed)\n");
+        fprintf(stderr, "  Decode Forward Rate:          N/A\n");
+    }
     fprintf(stderr, "========================================================================================\n\n");
 
     printf("\n");
