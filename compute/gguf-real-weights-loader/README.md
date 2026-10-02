@@ -43,12 +43,31 @@ Canonical Basis Unit Tests ($e_i$) and dense random latent projection ($M=4096, 
 | **All Canonical Bases $e_i$** | — | — | — | **$0.0000\text{ e+}00$** | **$0.0000\text{ e+}00$** | **$1.000000$** | **PASS (100%)** |
 | **Dense Latent ($x \sim \mathcal{N}(0, 1)$)** | $13.71\text{ ms}$ | **$4.82\text{ ms}$** | **$2.84\times$** 🚀 | $2.62 \times 10^{-6}$ | **$6.93 \times 10^{-7}$** | **$1.000000$** | **PASS** |
 
-### 3. Isolated 2-Layer Subsystem (`test_real_layers`)
+### 3. Phase B: Full 28 Layers + LM Head Logits Validation (`test_full_model_logits`)
+
+Full pipeline execution with official Qwen2.5-Coder-1.5B weights: 28 Decoder Layers (Q4_0) + Output Norm (FP32) + LM Head (151,936 rows of Q6_K, 182.57 MB). Total model memory resident in GT 750M VRAM: **1110 MB** (< 55% of 2 GB VRAM).
+
+| Prompt Evaluated | Latency CPU Haswell (8T) | Latency GPU GT 750M | Speedup vs CPU | Top-1 Predicted Token | ArgMax GPU vs CPU Logit | Margin $\Delta$ ($z_{(1)} - z_{(2)}$) | Max Error $\epsilon_\infty$ | Condition $\Delta > 2\epsilon_\infty$ |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **"Hi"** (Token 13048) | $1905.83\text{ ms}$ | **$1945.32\text{ ms}$** | $0.98\times$ | Token 16 (`'1'`) | $10.2319$ vs $10.2319$ | **$0.4415$** | $5.82 \times 10^{-5}$ | **MET ($0.4415 > 1.16 \times 10^{-4}$)** ✅ |
+| **"def"** (Token 750) | $1768.70\text{ ms}$ | **$1328.79\text{ ms}$** | **$1.33\times$** 🚀 | Token 16 (`'1'`) | $10.9106$ vs $10.9105$ | **$1.4854$** | $1.26 \times 10^{-4}$ | **MET ($1.4854 > 2.52 \times 10^{-4}$)** ✅ |
+
+#### Top-5 Predicted Continuation Tokens ("Hi"):
+| Rank | Token ID | Decoded Text | GPU Logit | CPU Logit | Absolute Error | Status |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **#1** | **16** | `'1'` | **10.2319** | **10.2319** | **$2.77 \times 10^{-5}$** | **Top-1 ArgMax Match!** |
+| **#2** | **13** | `'.'` | 9.7904 | 9.7904 | $5.82 \times 10^{-5}$ | Match |
+| **#3** | **11** | `','` | 9.3392 | 9.3393 | $5.25 \times 10^{-5}$ | Match |
+| **#4** | **18** | `'3'` | 8.6835 | 8.6836 | $3.24 \times 10^{-5}$ | Match |
+| **#5** | **17** | `'2'` | 8.3430 | 8.3430 | $3.43 \times 10^{-5}$ | Match |
+
+### 4. Isolated 2-Layer Subsystem (`test_real_layers`)
 
 | Step | Sequence Position / Context | CPU Haswell (8T) | GPU GT 750M | Speedup vs CPU | Relative $L_2$ Error | Cosine Similarity |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Token 0** | $\text{pos}=0$ ($T=1$) | $190.09\text{ ms}$ | **$105.54\text{ ms}$** | **$1.80\times$** 🚀 | **$2.62 \times 10^{-6}$** | **$1.000000$** |
 | **Token 1** | $\text{pos}=1$ ($T=2$) | $297.30\text{ ms}$ | **$89.55\text{ ms}$** | **$3.32\times$** 🚀 | **$6.12 \times 10^{-6}$** | **$1.000000$** |
+
 
 ---
 

@@ -11,6 +11,7 @@ profile_gaps
 test_real_layers
 test_28_layers_real
 test_gemv_q6_k
+test_full_model_logits
 
 
 # Python cache
