@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -O3 -mavx2 -mf16c -mfma -fopenmp -Wall -Wextra
 LDFLAGS = -lOpenCL -lm -fopenmp
 
-TARGETS = test_real_layers test_28_layers_real test_gemv_q6_k test_full_model_logits generate_stream qwen_server
+TARGETS = test_real_layers test_28_layers_real test_gemv_q6_k test_full_model_logits generate_stream qwen_server generate_stream_05b
 
 all: $(TARGETS)
 
@@ -21,6 +21,9 @@ test_full_model_logits: test_full_model_logits.c
 generate_stream: generate_stream.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+generate_stream_05b: generate_stream_05b.c
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 clean:
 	rm -f $(TARGETS)
 
@@ -29,7 +32,6 @@ run: generate_stream
 
 .PHONY: all clean run
 
-
-
 qwen_server: qwen_server.c
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
