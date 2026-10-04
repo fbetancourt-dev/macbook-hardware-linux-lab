@@ -245,6 +245,46 @@ The Intel Core i7-4870HQ processor features **4 physical cores** and **8 logical
 > **Why 4 Threads is the Physical Optimum:**  
 > LLM autoregressive token decode is strictly memory-bandwidth bound. Intel Hyper-Threading allows two logical threads to share the same physical ALUs, vector registers (AVX2), and L1/L2 caches. At 8 threads, thread synchronization overhead and L1/L2 data cache evictions cause severe CPU stall cycles, collapsing throughput. For CPU inference on 4-core Haswell chips, **`-t 4` delivers the peak performance**.
 
+### 6.6 Ephemeral Lifecycle vs Daemons & Autonomous Hardware Telemetry
+
+#### Elimination of Persistent Daemons
+In earlier iterations, running local LLMs on discrete GPUs with limited memory (such as Kepler GT 750M with 2.0 GB VRAM) often relied on long-running background daemons (`qwen_server`) to avoid reloading weights into VRAM on every invocation. However, leaving ~1.1 GB of VRAM permanently occupied degrades desktop compositing, external display driving, and graphical CAD applications (KiCad, FreeCAD, Blender).
+
+`ask-qwen` now enforces an **Ephemeral JIT Lifecycle (Just-In-Time)**:
+1. **Invocation:** Dynamically allocates VRAM buffers via OpenCL Rusticl or system RAM.
+2. **Inference:** Streams tokens with low latency.
+3. **Guaranteed Teardown:** Explicitly frees OpenCL command queues, buffers (`clReleaseMemObject`), and contexts immediately upon emitting `<|im_end|>`, restoring VRAM to 0 MB resident usage upon process exit.
+
+```
+[Invocación: ask-qwen] ──► [Alocación VRAM / RAM] ──► [Inferencia Streaming] ──► [Teardown Total & 0 MB VRAM]
+```
+
+#### Autonomous Hardware Telemetry (`ask-qwen --status`)
+Querying system health and hardware capabilities requires **no daemon, socket, or background process**. The tool interrogates DRM and OpenCL drivers natively:
+
+```text
+$ ask-qwen --status
+==========================================================================
+  🧠 LOCAL AI SYSTEM & SILICON HARDWARE STATUS (Standalone / No Daemon)
+==========================================================================
+  GPU Hardware:       🟢 NVIDIA GeForce GT 750M Mac Edition (GK107 Kepler)
+  GPU Acceleration:   nouveau + rusticl (Mesa OpenCL 3.0)
+  VRAM Total:         1.98 GiB
+  VRAM Status:        Idle / Libre (0 MB en uso permanente)
+--------------------------------------------------------------------------
+  CPU Processor:      Intel Core i7-4870HQ (4 Cores / 8 Threads)
+  CPU Instructions:   AVX2, FMA3, SSE4.2 (Optimal Threads: 4)
+--------------------------------------------------------------------------
+  Modelos Locales:    Qwen2.5 0.5B (✅ Instalado) | Qwen2.5-Coder 1.5B (✅ Instalado)
+--------------------------------------------------------------------------
+  Memoria & Perfil:   profile.md (Configurado) | Facts aprendidos: 6
+  Manifiesto Contexto: 218 tokens base sincronizados
+==========================================================================
+```
+
+#### Interactive Session Mode (`ask-qwen chat`)
+For multi-turn technical sessions where paying the initial 2.5s weight-loading penalty per query is undesirable, the interactive session mode loads weights once into VRAM, provides an interactive shell `qwen-gpu >>> `, and completely purges VRAM when the session terminates (`exit` / `Ctrl+C`).
+
 ---
 
 ## 7. Key Engineering Conclusions & The 16 GB Memory Wall
