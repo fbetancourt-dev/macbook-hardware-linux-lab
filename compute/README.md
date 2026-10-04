@@ -26,5 +26,6 @@ High-performance physical simulations, control theory ensembles, and local Large
 * **CPU (Intel Core i7-4870HQ Haswell):** Used for token embedding dequantization/lookup before PCIe dispatch, large prompt batch prefill, fast host tokenizer execution, OS virtualization, and secondary LLM fallback.
 
 For in-depth architectural and driver analysis, see:
+* [`../docs/DEEPSEEK_LOCAL_MODELS_BENCHMARK.md`](../docs/DEEPSEEK_LOCAL_MODELS_BENCHMARK.md): **DeepSeek Benchmark Whitepaper: Why, How, and What We Achieved** comparing 1.3B, 1.5B, 6.7B, 7B, 8B, and 14B on Haswell AVX2.
 * [`../docs/KEPLER_GPGPU_LLM_ARCHITECTURE.md`](../docs/KEPLER_GPGPU_LLM_ARCHITECTURE.md): **Whitepaper: Why, How, and What We Achieved** with Kepler GPGPU LLM Acceleration.
 * [`../docs/opencl-rusticl-setup.md`](../docs/opencl-rusticl-setup.md): Package installation, `RUSTICL_ENABLE=nouveau`, and isolating Vulkan workloads.

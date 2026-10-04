@@ -84,6 +84,24 @@ We subjected local models to an identical engineering challenge: implementing an
 
 ---
 
+## 🧠 DeepSeek Local Family Scaling & Reasoning Benchmark
+
+We expanded the local suite to encompass the full spectrum of DeepSeek models running on Haswell AVX2 (from **1.3B up to 14B parameters**), including the **DeepSeek-R1** Chain-of-Thought (CoT) reasoning models:
+
+| Model | Memory Footprint (RSS) | Prompt Eval (TTFT) | Generation Rate (tok/s) | Architecture Base | Primary Role |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **`deepseek-coder:1.3b`** | **~850 MB** | **33.5 tokens/s** | **25.0 – 35.0 t/s** ⚡ | DeepSeek-Coder V1 | Real-time Tab Autocomplete |
+| **`deepseek-r1:1.5b`** | **~1.3 GB** | **29.0 tokens/s** | **7.5 – 12.0 t/s** | Qwen 2.5 1.5B Distill | Fast Edge CoT / IoT Assistant |
+| **`deepseek-coder:6.7b`** | **~4.2 GB** | **12.9 tokens/s** | **4.0 – 5.5 t/s** | LLaMA-derived Coder | Firmware & Multi-File Refactor |
+| **`deepseek-r1:7b`** | **~5.1 GB** | **11.2 tokens/s** | **3.5 – 4.8 t/s** | Qwen 2.5 7B Distill | **Optimal Reasoning Sweet Spot** |
+| **`deepseek-r1:8b`** | **~5.6 GB** | **10.8 tokens/s** | **3.2 – 4.4 t/s** | Llama 3.1 8B Distill | Strict Instruction Adherence |
+| **`deepseek-r1:14b`** | **~9.6 GB** | **6.4 tokens/s** | **1.4 – 2.1 t/s** | Qwen 2.5 14B Distill | Deepest Architectural Analysis |
+
+> [!TIP]
+> 📖 **Full Engineering Whitepaper Available:** For in-depth analysis of the `<think>` scaling laws, physics derivation comparisons, memory budgeting, and thermal governance, read the **[DeepSeek Local Models Benchmark Whitepaper](../../docs/DEEPSEEK_LOCAL_MODELS_BENCHMARK.md)** (Why, What, How, and What We Achieved).
+
+---
+
 ## 🛠️ Native Application Structure (`~/Applications/llama.cpp/`)
 
 Organized according to system out-of-source standards:
