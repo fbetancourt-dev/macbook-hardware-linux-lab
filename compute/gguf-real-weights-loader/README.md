@@ -2,6 +2,9 @@
 
 Direct hardware execution and numerical validation of real model weights loaded from an official GGUF model file (**Qwen2.5-Coder-1.5B-Instruct-Q4_0.gguf**) running across the complete 28 decoder layers ($blk.0$ through $blk.27$) + Output Norm on the **NVIDIA GeForce GT 750M (Kepler GK107, 2 GB GDDR5)** under **Mesa Rusticl (OpenCL 3.0)** compared against an 8-thread **Intel Core i7-4870HQ (Haswell AVX2 + FMA3)** CPU reference.
 
+> [!TIP]
+> 📖 **Comprehensive Engineering Paper Available:** For an in-depth breakdown of the motivation, driver bypass techniques, VRAM budgeting, and numerical validation, read the **[Kepler GPGPU LLM Architecture Whitepaper](../../docs/KEPLER_GPGPU_LLM_ARCHITECTURE.md)** (Why, How, and What We Achieved).
+
 ---
 
 ## 🎯 Architecture & Scaling Law

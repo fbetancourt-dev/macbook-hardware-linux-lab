@@ -92,6 +92,7 @@ This repository transforms the 2014 MacBook Pro into a dual-purpose engineering 
 
 ## 📚 Central Documentation & Guides
 
+* [`docs/KEPLER_GPGPU_LLM_ARCHITECTURE.md`](docs/KEPLER_GPGPU_LLM_ARCHITECTURE.md): **Engineering Whitepaper: Why, How, and What We Achieved** running Qwen2.5-Coder-1.5B directly on the NVIDIA GT 750M (Kepler OpenCL 3.0 via Mesa Rusticl).
 * [`docs/opencl-rusticl-setup.md`](docs/opencl-rusticl-setup.md): Complete guide to configuring Mesa Rusticl, environment variables, compiler flags, and avoiding Vulkan pushbuf collisions.
 * [`docs/MOTHERBOARD_TOPOLOGY.md`](docs/MOTHERBOARD_TOPOLOGY.md): In-depth hardware topology, bus mappings, and PCIe BAR assignments.
 * [`tools/macbook_system_audit.sh`](tools/macbook_system_audit.sh): Automated diagnostic script auditing system sensors, PCIe links, and kernel drivers.
