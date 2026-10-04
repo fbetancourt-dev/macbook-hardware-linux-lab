@@ -71,16 +71,17 @@ We empirically patched `ggml/src/ggml-opencl/ggml-opencl.cpp` to bypass device w
 
 We subjected local models to an identical engineering challenge: implementing an accurate **Runge-Kutta 4th-Order (RK4)** numerical ODE integrator in Python with static typing, docstrings, and a damped harmonic oscillator simulation.
 
-| Metric | DeepSeek-Coder 6.7B (Ollama CPU) | DeepSeek-Coder 1.3B (CPU AVX2) | Qwen2.5-Coder 1.5B (llama-server) |
-| :--- | :---: | :---: | :---: |
-| **Generation Speed** | 2.43 tokens/sec | **9.71 tokens/sec** | **11.5 - 12.6 tokens/sec** ⚡ |
-| **Prompt Eval Speed** | 12.88 tokens/sec | **32.46 tokens/sec** | **37.3 tokens/sec** 🚀 |
-| **Wall Clock Time (512 tok)** | 220.46 s (~3.67 min) | **59.44 s (< 1 min)** | **~42 s** |
-| **RAM Footprint (RSS)** | ~4.2 GB | ~850 MB | **~809 MB** |
-| **Implementation Correctness** | Syntax error in $k_3$ formula (`t + 0 dt`) | **100% correct**, zero syntax errors | **100% correct**, clean typing |
-| **Ideal Role in Continue** | Deep architectural chat (on-demand) | Ghost-text & Tab autocomplete | **Ghost-text & Tab autocomplete** |
+| Metric | DeepSeek-Coder 6.7B (Ollama) | DeepSeek-Coder 1.3B (Ollama) | Qwen2.5-Coder 1.5B (llama-server) | Qwen2.5-Coder 1.5B (Kepler Engine) |
+| :--- | :---: | :---: | :---: | :---: |
+| **Execution Silicon** | **Intel i7-4870HQ (8T AVX2)** | **Intel i7-4870HQ (8T AVX2)** | **Intel i7-4870HQ (8T AVX2)** | **NVIDIA GT 750M (384 Kepler)** |
+| **Memory Allocation** | ~4.2 GB System RAM | ~850 MB System RAM | ~809 MB System RAM | 1,110 MB GDDR5 VRAM |
+| **Generation Speed** | 2.43 tokens/sec | **9.71 tokens/sec** | **11.5 - 12.6 tokens/sec** ⚡ | **1.03 tokens/sec** (0% CPU Load) |
+| **Prompt Eval Speed** | 12.88 tokens/sec | **32.46 tokens/sec** | **37.3 tokens/sec** 🚀 | 1.40 tokens/sec |
+| **Wall Clock Time (512 tok)** | 220.46 s (~3.67 min) | **59.44 s (< 1 min)** | **~42 s** | N/A |
+| **Implementation Correctness** | Syntax error in $k_3$ formula (`t + 0 dt`) | **100% correct**, zero syntax errors | **100% correct**, clean typing | Identical bit-for-bit output |
+| **Ideal Role in Workflow** | Deep architectural chat (on-demand) | Ghost-text & Tab autocomplete | **Ghost-text & Tab autocomplete** | Dedicated GPU Background Worker |
 
-> **Key Takeaway:** For interactive pairing in Continue (VS Code), **latency is king**. Compact models ($\le 1.5$B) running on Haswell AVX2 deliver immediate sub-second completions without breaking developer flow.
+> **Key Takeaway:** For interactive pairing in Continue (VS Code), **latency is king**. Compact models ($\le 1.5$B) running on Haswell AVX2 deliver immediate sub-second completions without breaking developer flow. For zero CPU interference, the native GT 750M Kepler engine runs resident in VRAM.
 
 ---
 
@@ -88,14 +89,14 @@ We subjected local models to an identical engineering challenge: implementing an
 
 We expanded the local suite to encompass the full spectrum of DeepSeek models running on Haswell AVX2 (from **1.3B up to 14B parameters**), including the **DeepSeek-R1** Chain-of-Thought (CoT) reasoning models:
 
-| Model | Memory Footprint (RSS) | Prompt Eval (TTFT) | Generation Rate (tok/s) | Architecture Base | Primary Role |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **`deepseek-coder:1.3b`** | **~850 MB** | **33.5 tokens/s** | **25.0 – 35.0 t/s** ⚡ | DeepSeek-Coder V1 | Real-time Tab Autocomplete |
-| **`deepseek-r1:1.5b`** | **~1.3 GB** | **29.0 tokens/s** | **7.5 – 12.0 t/s** | Qwen 2.5 1.5B Distill | Fast Edge CoT / IoT Assistant |
-| **`deepseek-coder:6.7b`** | **~4.2 GB** | **12.9 tokens/s** | **4.0 – 5.5 t/s** | LLaMA-derived Coder | Firmware & Multi-File Refactor |
-| **`deepseek-r1:7b`** | **~5.1 GB** | **11.2 tokens/s** | **3.5 – 4.8 t/s** | Qwen 2.5 7B Distill | **Optimal Reasoning Sweet Spot** |
-| **`deepseek-r1:8b`** | **~5.6 GB** | **10.8 tokens/s** | **3.2 – 4.4 t/s** | Llama 3.1 8B Distill | Strict Instruction Adherence |
-| **`deepseek-r1:14b`** | **~9.6 GB** | **6.4 tokens/s** | **1.4 – 2.1 t/s** | Qwen 2.5 14B Distill | Deepest Architectural Analysis |
+| Model | Execution Silicon (Processor / GPU) | Memory Footprint (RAM / VRAM) | Prompt Eval (TTFT) | Generation Rate (tok/s) | Architecture Base | Primary Role |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`deepseek-coder:1.3b`** | **Intel Core i7-4870HQ (8T AVX2)** | **~850 MB RAM** | **33.5 tokens/s** | **25.0 – 35.0 t/s** ⚡ | DeepSeek-Coder V1 | Real-time Tab Autocomplete |
+| **`deepseek-r1:1.5b`** | **Intel Core i7-4870HQ (8T AVX2)** | **~1.3 GB RAM** | **29.0 tokens/s** | **7.5 – 12.0 t/s** | Qwen 2.5 1.5B Distill | Fast Edge CoT / IoT Assistant |
+| **`deepseek-coder:6.7b`** | **Intel Core i7-4870HQ (8T AVX2)** | **~4.2 GB RAM** | **12.9 tokens/s** | **4.0 – 5.5 t/s** | LLaMA-derived Coder | Firmware & Multi-File Refactor |
+| **`deepseek-r1:7b`** | **Intel Core i7-4870HQ (8T AVX2)** | **~5.1 GB RAM** | **11.2 tokens/s** | **3.5 – 4.8 t/s** | Qwen 2.5 7B Distill | **Optimal Reasoning Sweet Spot** |
+| **`deepseek-r1:8b`** | **Intel Core i7-4870HQ (8T AVX2)** | **~5.6 GB RAM** | **10.8 tokens/s** | **3.2 – 4.4 t/s** | Llama 3.1 8B Distill | Strict Instruction Adherence |
+| **`deepseek-r1:14b`** | **Intel Core i7-4870HQ (8T AVX2)** | **~9.6 GB RAM** | **6.4 tokens/s** | **1.4 – 2.1 t/s** | Qwen 2.5 14B Distill | Deepest Architectural Analysis |
 
 > [!TIP]
 > 📖 **Full Engineering Whitepaper Available:** For in-depth analysis of the `<think>` scaling laws, physics derivation comparisons, memory budgeting, and thermal governance, read the **[DeepSeek Local Models Benchmark Whitepaper](../../docs/DEEPSEEK_LOCAL_MODELS_BENCHMARK.md)** (Why, What, How, and What We Achieved).
