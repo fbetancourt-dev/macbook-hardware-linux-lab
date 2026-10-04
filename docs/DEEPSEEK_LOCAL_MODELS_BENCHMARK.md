@@ -93,12 +93,16 @@ By observing the internal monologue of the R1 reasoning models across parameter 
 | :--- | :---: | :---: | :---: | :---: | :--- |
 | **`deepseek-coder:1.3b`** | **~850 MB** | **33.5 tokens/s** | **25.0 – 35.0 t/s** ⚡ | Fast syntax autocomplete | **Active Tab Completion (Continue)** |
 | **`deepseek-r1:1.5b`** | **~1.3 GB** | **29.0 tokens/s** | **7.5 – 12.0 t/s** | Heuristic reasoning | **Edge IoT / Orange Pi candidate** |
-| **`deepseek-coder:6.7b`** | **~4.2 GB** | **12.9 tokens/s** | **4.0 – 5.5 t/s** | High code accuracy | **Complex code refactoring** |
-| **`deepseek-r1:7b`** | **~5.1 GB** | **11.2 tokens/s** | **3.5 – 4.8 t/s** | **Exceptional logical CoT** | **Primary Local Reasoning Engine** |
-| **`deepseek-r1:8b`** | **~5.6 GB** | **6.4 tokens/s** | **1.6 – 2.5 t/s** | **High engineering precision (4.7 kΩ)** | **Deep Instruction & Code Reasoning** |
-| **`deepseek-r1:14b`** | **~9.6 GB (12.5 GB peak)** | **N/A (OOM)** | **OOM-Killed at 4k ctx** | Maximum theoretical depth | **Requires reduced context (`num_ctx ≤ 2048`)** |
+| **`deepseek-coder:6.7b`** | **~4.2 GB** | **5.76 tokens/s** | **2.13 t/s** | SFT direct output (alucina fórmulas) | **Code autocomplete / Refactoring** |
+| **`deepseek-r1:7b`** | **~5.1 GB** | **5.95 tokens/s** | **2.23 t/s** | **Exceptional logical CoT (GPIO confusion)** | **Primary Local Reasoning Engine** |
+| **`deepseek-r1:8b`** | **~5.6 GB** | **6.38 tokens/s** | **1.57 t/s** | **Flawless engineering precision (4.7 kΩ)** | **Deep Instruction & Code Reasoning** |
+| **`deepseek-r1:14b`** | **~9.6 GB (14.0 GB peak)** | **N/A (OOM)** | **OOM-Killed** | Maximum theoretical depth | **Exceeds physical RAM envelope** |
 
 ### 4.2 Key Engineering Conclusions & The 16 GB Memory Wall
-1. **The 8B Hardware Ceiling:** While `deepseek-r1:7b` and `deepseek-r1:8b` run cleanly within system memory (taking ~5.1–5.6 GB RSS and leaving 5+ GB headroom for desktop applications), **`deepseek-r1:14b` triggers the Linux kernel OOM Killer (`Failed with result 'oom-kill'`)** when launched with the default 4,096-token context window on a 16 GB RAM system under an active Wayland/GNOME session. The combined footprint of weights ($8.56\text{ GB}$) + KV cache ($2.5\text{ GB}$) + compute scratchpad ($1.5\text{ GB}$) breaches the available memory threshold ($11.6\text{ GB}$).
-2. **The 8B Reasoning Precision:** In our empirical I2C pull-up benchmark, `deepseek-r1:8b` successfully bypassed the 40 mA GPIO confusion of smaller models, directly identifying open-drain topology, the 400 pF bus capacitance ceiling, and correctly deducing the industry-standard **$4.7\text{ k}\Omega$** pull-up value.
+1. **The SFT vs CoT Divergence (`coder:6.7b` vs `r1:8b`):**  
+   Subjecting both models to the identical hardware prompt (*why I2C requires pull-ups and calculating the typical 100 kHz value*) produced a textbook illustration of why Reinforcement Learning reasoning is superior for physical sciences:
+   - **`deepseek-coder:6.7b`** (Standard Supervised Fine-Tuning): Generated output directly without deliberating. It inverted physical causality (claiming pull-ups prevent the line from being "always high") and hallucinated a non-physical formula:
+     $$R_{\text{pullup}} = \frac{V_{CC} \cdot R_L}{\frac{1000}{f} - 1}$$
+   - **`deepseek-r1:8b`** (Reinforcement Learning with `<think>` CoT): Explicitly reasoned through open-drain mechanics (devices can sink to GND but cannot source to VCC), analyzed capacitive bus loading ($C_{\text{bus}} \le 400\text{ pF}$), and correctly derived the industry-standard **$4.7\text{ k}\Omega$** pull-up value.
+2. **The 8B Hardware Ceiling:** While `deepseek-r1:7b` and `deepseek-r1:8b` run cleanly within system memory (taking ~5.1–5.6 GB RSS and leaving 5+ GB headroom for desktop applications), **`deepseek-r1:14b` triggers the Linux kernel OOM Killer (`Failed with result 'oom-kill'`)** even when tested with a reduced 2,048-token context window. At a 14 GB peak memory allocation plus 3.7 GB swap, it breaches the physical 16 GB RAM ceiling of this workstation.
 3. **Sub-2B Edge Utility:** The 1.3B and 1.5B models generate at $>8 - 30\text{ tokens/s}$, making them prime candidates for deployment on micro-SBCs like the Orange Pi Zero 3W (4GB LPDDR4).
