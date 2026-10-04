@@ -8,6 +8,12 @@
 **Host CPU:** Intel Core i7-4870HQ @ 2.50 GHz (Haswell Crystalwell, AVX2 + FMA3, 16 GB DDR3L)  
 **OS & Graphics Stack:** Ubuntu 24.04 LTS (Kernel 6.8+), Wayland / GNOME Shell, Mesa Rusticl (OpenCL 3.0) over `nouveau`  
 
+<p align="center">
+  <img src="../assets/kepler_transformer_prime.jpg" alt="Optimus Prime Kepler Transformer Engine" width="100%"/>
+  <br>
+  <em>Figure 1: The Kepler Transformer Engine — Fusing Optimus Prime robotics aesthetic with real NVIDIA GT 750M GPGPU silicon execution.</em>
+</p>
+
 ---
 
 ## 1. The "Why" (Context & Motivation)

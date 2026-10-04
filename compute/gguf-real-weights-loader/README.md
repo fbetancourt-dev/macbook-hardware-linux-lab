@@ -5,6 +5,10 @@ Direct hardware execution and numerical validation of real model weights loaded 
 > [!TIP]
 > 📖 **Comprehensive Engineering Paper Available:** For an in-depth breakdown of the motivation, driver bypass techniques, VRAM budgeting, and numerical validation, read the **[Kepler GPGPU LLM Architecture Whitepaper](../../docs/KEPLER_GPGPU_LLM_ARCHITECTURE.md)** (Why, How, and What We Achieved).
 
+<p align="center">
+  <img src="../../assets/kepler_transformer_prime.jpg" alt="Kepler Transformer Engine" width="100%"/>
+</p>
+
 ---
 
 ## 🎯 Architecture & Scaling Law
