@@ -97,15 +97,70 @@ By observing the internal monologue of the R1 reasoning models across parameter 
 | **`deepseek-r1:7b`** | **~5.1 GB** | **5.95 tokens/s** | **2.23 t/s** | **Exceptional logical CoT (GPIO confusion)** | **Primary Local Reasoning Engine** |
 | **`deepseek-r1:8b`** | **~5.6 GB** | **6.38 tokens/s** | **1.57 t/s** | **Flawless engineering precision (4.7 kΩ)** | **Deep Instruction & Code Reasoning** |
 | **`deepseek-r1:14b`** | **~9.6 GB (14.0 GB peak)** | **N/A (OOM)** | **OOM-Killed** | Maximum theoretical depth | **Exceeds physical RAM envelope** |
-| **`qwen2.5-coder:7b`** *(Ref)*| **~5.0 GB** | **5.97 tokens/s** | **2.50 t/s** | **Concise, direct & 100% accurate (4.7 kΩ)** | **Default Coding & Quick Reference** |
+| **`qwen2.5:0.5b`** | **~450 MB** | **45.2 tokens/s** | **12.43 t/s** ⚡ | Alucinaciones severas ("Control de la Tierra") | **Ultra-light edge test only** |
+| **`qwen2.5-coder:1.5b`** | **~1.1 GB** | **31.8 tokens/s** | **10.63 t/s** ⚡ | Comprensión básica de pull-up ($10\text{ k}\Omega$) | **Edge micro-controllers / Orange Pi** |
+| **`qwen2.5-coder:3b`** | **~2.2 GB** | **15.4 tokens/s** | **3.46 t/s** | Razonamiento directo open-drain ($4.7\text{ k}\Omega$) | **Balanced local coding** |
+| **`qwen2.5-coder:7b`** *(Ref)*| **~5.0 GB** | **5.97 tokens/s** | **3.08 t/s** | **Concise, direct & 100% accurate (4.7 kΩ)** | **Default Coding & Quick Reference** |
 
-### 4.2 Key Engineering Conclusions & The 16 GB Memory Wall
+---
+
+## 5. Comprehensive Qwen 2.5 Local Spectrum Benchmark
+
+Following the DeepSeek evaluation, we subjected the entire compatible Alibaba **Qwen 2.5** family (`0.5B`, `1.5B`, `3B`, `7B`) to the exact same physical electronics challenge:
+> *"Explica brevemente por que un bus I2C necesita resistencias pull-up y calcula el valor tipico a 100 kHz."*
+
+### 5.1 Qwen Benchmark Summary Table
+
+| Model Variant | Disk Footprint | Memory RSS | Eval Rate (Speed) | Response Time | Physical Accuracy & Engineering Quality |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **`qwen2.5:0.5b`** | 397 MB | ~450 MB | **12.43 t/s** | 27.47 s | **Severe Hallucination:** Translates I2C as *"Interfaz de Comunicación de Control de la Tierra"*, cites *"alta presión"*, states 100 kHz transmission time is 100 ns. Fails electronics challenge. |
+| **`qwen2.5-coder:1.5b`** | 986 MB | ~1.1 GB | **10.63 t/s** | 36.82 s | **Basic Competence:** Correctly identifies I2C, understands pull-up keeps bus idle high, selects **$10\text{ k}\Omega$** standard. Crude RC time calculation. |
+| **`qwen2.5-coder:3b`** | 1.9 GB | ~2.2 GB | **3.46 t/s** | 101.2 s | **High Quality:** Correctly identifies shared open-drain architecture and derives the industry-standard **$4.7\text{ k}\Omega$** pull-up value. |
+| **`qwen2.5-coder:7b`** | 4.7 GB | ~5.0 GB | **3.08 t/s** | 53.0 s | **Gold Standard (Production Winner):** Direct, concise, zero fluff, perfectly explains open-drain state conditioning and prescribes **$4.7\text{ k}\Omega$** (and $10\text{ k}\Omega$ for low power). |
+
+### 5.2 The 0.5B vs 7B Quality Inflection
+- **0.5B Threshold:** Sub-billion parameter models lack the parameter density required to encode multi-domain technical ontologies (electrical engineering concepts degrade into semantic word-salad).
+- **1.5B – 3B Transition:** At 1.5B, the model achieves valid functional heuristics; at 3B, it reliably understands circuit topology (open-drain / wired-AND).
+- **7B Mastery:** Qwen2.5-Coder-7B delivers production-grade engineering answers with zero hallucination and without the lengthy token overhead of Chain-of-Thought reasoning.
+
+---
+
+## 6. Hardware Resource Mapping: CPU vs GPU vs RAM vs VRAM
+
+A critical operational distinction on the Mid-2014 MacBook Pro (`MacBookPro11,3`) is how different runtimes allocate compute and memory between host resources and discrete silicon.
+
+### 6.1 Architecture Allocation Comparison Matrix
+
+| Runtime / Engine | Compute Processor | System RAM | GPU VRAM | GPU Compute (Cores) | Acceleration Backend |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Standard Ollama / llama.cpp** (`deepseek`, `qwen`, `llama`) | **100% CPU** (Intel i7-4870HQ) | **100% Host RAM** (16 GB DDR3L) | **0 MB** (Untouched) | **0%** (Idle) | AVX2 + FMA3 SIMD (`libggml-cpu-haswell.so`) |
+| **Custom GGUF Engine** (`ask-qwen`, `qwen2.5-coder:1.5b`) | **GPU + Host CPU Orchestrator** | **~445 MB** (Embedding table) | **1,110 MB** (54% of 2 GB GDDR5) | **100% Active** (384 Kepler Cores) | OpenCL 3.0 via Mesa Rusticl (`RUSTICL_ENABLE=nouveau`) |
+
+### 6.2 Detailed Hardware Breakdown
+
+#### 1. Standard Ollama Execution (CPU + RAM Only)
+- **CPU (Intel Core i7-4870HQ, 4 Cores / 8 Threads):** Handles all GEMM/GEMV matrix multiplications across 8 AVX2 SIMD threads.
+- **System RAM (16 GB DDR3L-1600 MHz):** Holds the entire model weights, KV cache, and activations. Models $\le 8\text{B}$ utilize 1.1 GB to 5.6 GB RAM.
+- **NVIDIA GPU (GeForce GT 750M, Kepler GK107):** **Completely unutilized (0% load).** Modern CUDA 12/13 has dropped Kepler support (Compute Capability 3.0), and the open-source `nouveau` kernel driver does not provide proprietary CUDA runtime hooks to Ollama.
+- **VRAM (2 GB GDDR5):** **0 MB used by LLM inference.** VRAM is solely utilized by the GNOME Wayland compositor and desktop framebuffer (~150–220 MB).
+
+#### 2. Custom Kepler GPGPU Engine Execution (GPU + VRAM Native)
+- **GPU (NVIDIA GeForce GT 750M):** Executes the full Transformer forward pass (attention dot-product, RMSNorm, SwiGLU FFN feed-forward, and LM head projection) across **384 Kepler CUDA cores** using custom C99 + OpenCL kernels.
+- **VRAM (2,048 MB GDDR5 Dedicated):** **1,110 MB permanently allocated** in GPU memory:
+  - 28 Decoder Layers in Q4_0 quantized format: **~993 MB**
+  - LM Output Head projection in Q6_K: **~78 MB**
+  - KV Cache context ring-buffer: **~39 MB**
+- **CPU (Haswell i7):** Acts as an I/O orchestrator. It looks up the input token in the embedding table and transfers the 1536-float embedding vector to the GPU over PCIe Gen3 x16 ($<15\ \mu\text{s}$).
+- **System RAM:** Retains only the embedding weight matrix (`token_embd.weight`, ~445 MB).
+
+---
+
+## 7. Key Engineering Conclusions & The 16 GB Memory Wall
 1. **The SFT vs CoT Divergence (`coder:6.7b` vs `r1:8b`):**  
-   Subjecting both models to the identical hardware prompt (*why I2C requires pull-ups and calculating the typical 100 kHz value*) produced a textbook illustration of why Reinforcement Learning reasoning is superior for physical sciences:
-   - **`deepseek-coder:6.7b`** (Standard Supervised Fine-Tuning): Generated output directly without deliberating. It inverted physical causality (claiming pull-ups prevent the line from being "always high") and hallucinated a non-physical formula:
-     $$R_{\text{pullup}} = \frac{V_{CC} \cdot R_L}{\frac{1000}{f} - 1}$$
-   - **`deepseek-r1:8b`** (Reinforcement Learning with `<think>` CoT): Explicitly reasoned through open-drain mechanics (devices can sink to GND but cannot source to VCC), analyzed capacitive bus loading ($C_{\text{bus}} \le 400\text{ pF}$), and correctly derived the industry-standard **$4.7\text{ k}\Omega$** pull-up value.
-2. **The Direct Competitor (`qwen2.5-coder:7b`):**  
-   Tested against the exact same hardware challenge, Alibaba's **Qwen2.5-Coder-7B** delivered the most concise and direct response: without needing a multi-thousand-token thought monologue, it correctly identified open-drain signal conditioning and delivered the exact industry standard **$4.7\text{ k}\Omega$** in strictly **33 seconds** of generation.
-3. **The 8B Hardware Ceiling:** While `deepseek-r1:7b` and `deepseek-r1:8b` run cleanly within system memory (taking ~5.1–5.6 GB RSS and leaving 5+ GB headroom for desktop applications), **`deepseek-r1:14b` triggers the Linux kernel OOM Killer (`Failed with result 'oom-kill'`)** even when tested with a reduced 2,048-token context window. At a 14 GB peak memory allocation plus 3.7 GB swap, it breaches the physical 16 GB RAM ceiling of this workstation.
-4. **Sub-2B Edge Utility:** The 1.3B and 1.5B models generate at $>8 - 30\text{ tokens/s}$, making them prime candidates for deployment on micro-SBCs like the Orange Pi Zero 3W (4GB LPDDR4).
+   Subjecting both models to the identical hardware prompt produced a textbook illustration of why Reinforcement Learning reasoning is superior for physical sciences:
+   - **`deepseek-coder:6.7b`**: Inverted physical causality and hallucinated a non-physical formula.
+   - **`deepseek-r1:8b`**: Explicitly reasoned through open-drain mechanics ($C_{\text{bus}} \le 400\text{ pF}$) and derived the standard **$4.7\text{ k}\Omega$** pull-up value.
+2. **The Qwen Direct Coding Champion (`qwen2.5-coder:7b`):**  
+   Delivered the most concise and direct response: without a multi-thousand-token thought monologue, it correctly identified open-drain signal conditioning and delivered **$4.7\text{ k}\Omega$** in **53 seconds** total.
+3. **The 8B Hardware Ceiling:** While `deepseek-r1:7b`, `deepseek-r1:8b`, and `qwen2.5-coder:7b` run cleanly within system memory (taking ~5.0–5.6 GB RSS and leaving 5+ GB headroom for desktop applications), **`deepseek-r1:14b` triggers the Linux kernel OOM Killer (`Failed with result 'oom-kill'`)** even with a reduced 2,048 context window due to physical RAM exhaustion.
+4. **Sub-2B Edge Utility:** The 1.3B and 1.5B models generate at $>10 - 30\text{ tokens/s}$, making them prime candidates for micro-SBCs like the Orange Pi Zero 3W (4GB LPDDR4).
