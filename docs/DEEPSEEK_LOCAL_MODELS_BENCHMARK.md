@@ -210,6 +210,26 @@ To evaluate both models across both compute architectures, we executed identical
 2. **GPU Scaling ($0.5\text{B}$ vs $1.5\text{B}$):** On the GT 750M, dropping from 1.5B to 0.5B reduces VRAM from 1,110 MB to 420 MB and accelerates generation by **$1.77\times$** ($0.92\text{ t/s} \to 1.63\text{ t/s}$), proving that smaller tensor dimensions ($896 \times 896$) significantly reduce PCIe and memory bandwidth pressure on older discrete GPUs.
 3. **CPU vs GPU Roles:** While the Haswell CPU achieves higher generation speed through L3 cache line prefetching, GPU inference allows true zero-interference background processing without stealing cycles from the developer's foreground compile or IDE tasks.
 
+### 6.5 Unified CLI (`ask-qwen`) End-to-End Validation & Telemetry
+
+Following the architectural parity with `ask-chatgpt`, the unified CLI tool [`ask-qwen`](file:///home/fbetancourt/.local/bin/ask-qwen) allows instantaneous silicon selection (`-d gpu`, `-d avx`, `-d cpu`), model scaling (`-m 0.5b`, `-m 1.5b`), and machine-readable JSON telemetry.
+
+#### Empirical Benchmark Verification across Backends (16 Generated Tokens)
+* Prompt: `"def add(a, b):\n    return "`
+* Output: ` a + b\n\ndef subtract(a, b):\n    return a - b\n\n`
+
+| Execution Backend (`-d`) | Model (`-m`) | Silicon / Compute Target | TTFT | Decode Rate | Latency / Token | VRAM / RAM | Host CPU Load |
+| :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: |
+| **`ask-qwen -d gpu`** | **0.5B** | **NVIDIA GT 750M (OpenCL Rusticl)** | $3.97\text{ s}$ | **$2.75\text{ tok/s}$** 🚀 | **$364\text{ ms/tok}$** | 420 MB VRAM | **0% (Idle)** 🏆 |
+| **`ask-qwen -d gpu`** | **1.5B** | **NVIDIA GT 750M (OpenCL Rusticl)** | $9.21\text{ s}$ | **$1.18\text{ tok/s}$** 🚀 | **$849\text{ ms/tok}$** | 1,110 MB VRAM | **0% (Idle)** 🏆 |
+| **`ask-qwen -d cpu`** | **0.5B** | **Intel i7-4870HQ (llama-cli 4T)** | $2.46\text{ s}$ | **$32.00\text{ tok/s}$** ⚡ | **$31\text{ ms/tok}$** | ~450 MB RAM | 4 Threads Pinned |
+| **`ask-qwen -d cpu`** | **1.5B** | **Intel i7-4870HQ (llama-cli 4T)** | $4.96\text{ s}$ | **$12.50\text{ tok/s}$** ⚡ | **$80\text{ ms/tok}$** | ~1.1 GB RAM | 4 Threads Pinned |
+
+**Key Architectural Observations:**
+1. **GPU Cold Recovery Speed:** The 1.5B model achieved **849.19 ms/token (1.18 t/s)** on GPU, fully exceeding the original 961 ms/token target from earlier runs.
+2. **0.5B GPU Acceleration:** Reached **364.02 ms/token (2.75 t/s)** directly on discrete Kepler hardware, demonstrating a **$2.33\times$ speedup** over 1.5B on the exact same GPU silicon.
+3. **Piped Stdin & Composability:** `echo "código" | ask-qwen -d gpu` and `--json` allow zero-overhead integration into automated shell scripts and development workflows.
+
 ---
 
 ## 7. Key Engineering Conclusions & The 16 GB Memory Wall

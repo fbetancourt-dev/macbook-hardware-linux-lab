@@ -423,7 +423,7 @@ def query_gpu_daemon(prompt: str, max_tokens: int, verbose: bool = False, output
     }
     return "".join(full_text), metrics
 
-def query_gpu_standalone(prompt: str, model_size: str, max_tokens: int, verbose: bool = False, output_json: bool = False):
+def query_gpu_standalone(prompt: str, model_size: str, max_tokens: int, verbose: bool = False, output_json: bool = False, raw: bool = False):
     model_path, tag = resolve_model_path(model_size)
     gen_bin = GENERATE_STREAM_05B if tag == "0.5b" else GENERATE_STREAM_15B
     if not os.path.exists(gen_bin):
@@ -431,11 +431,11 @@ def query_gpu_standalone(prompt: str, model_size: str, max_tokens: int, verbose:
 
     # Build ChatML prompt with system if exists
     sys_content = ""
-    if os.path.exists(PROFILE_FILE):
+    if not raw and os.path.exists(PROFILE_FILE):
         with open(PROFILE_FILE, "r", encoding="utf-8") as f:
             sys_content = f.read().strip()
     
-    full_prompt = f"<|im_start|>system\n{sys_content}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n" if sys_content else f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+    full_prompt = f"<|im_start|>system\n{sys_content}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n" if sys_content else (prompt if raw else f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
     tokens = tokenize(full_prompt, model_path)
     tok_str = ",".join(map(str, tokens))
 
@@ -444,7 +444,8 @@ def query_gpu_standalone(prompt: str, model_size: str, max_tokens: int, verbose:
     env["RUSTICL_ENABLE"] = "nouveau"
 
     t_start = time.perf_counter()
-    p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    bin_dir = os.path.dirname(gen_bin)
+    p = subprocess.Popen(cmd, env=env, cwd=bin_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 
     t_first_chunk = None
     chunks_count = 0
@@ -491,29 +492,31 @@ def query_gpu_standalone(prompt: str, model_size: str, max_tokens: int, verbose:
     }
     return gen_str, metrics
 
-def query_avx_ollama(prompt: str, model_size: str, max_tokens: int, verbose: bool = False, output_json: bool = False):
+def query_avx_ollama(prompt: str, model_size: str, max_tokens: int, verbose: bool = False, output_json: bool = False, raw: bool = False):
     ollama_model = MODEL_MAP_OLLAMA.get(model_size.lower().strip(), f"qwen2.5-coder:{model_size}")
     payload = {
         "model": ollama_model,
         "prompt": prompt,
+        "raw": raw,
         "stream": True,
         "options": {
             "num_predict": max_tokens,
             "num_thread": 8
         }
     }
-    # Add system prompt if available
-    sys_content = ""
-    if os.path.exists(PROFILE_FILE):
-        with open(PROFILE_FILE, "r", encoding="utf-8") as f:
-            sys_content = f.read().strip()
-    if os.path.exists(FACTS_FILE):
-        with open(FACTS_FILE, "r", encoding="utf-8") as f:
-            f_txt = f.read().strip()
-            if f_txt:
-                sys_content += "\n" + f_txt
-    if sys_content:
-        payload["system"] = sys_content
+    # Add system prompt if available and not raw
+    if not raw:
+        sys_content = ""
+        if os.path.exists(PROFILE_FILE):
+            with open(PROFILE_FILE, "r", encoding="utf-8") as f:
+                sys_content = f.read().strip()
+        if os.path.exists(FACTS_FILE):
+            with open(FACTS_FILE, "r", encoding="utf-8") as f:
+                f_txt = f.read().strip()
+                if f_txt:
+                    sys_content += "\n" + f_txt
+        if sys_content:
+            payload["system"] = sys_content
 
     req_data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(OLLAMA_API_URL, data=req_data, headers={"Content-Type": "application/json"})
@@ -541,16 +544,27 @@ def query_avx_ollama(prompt: str, model_size: str, max_tokens: int, verbose: boo
                 if obj.get("done"):
                     eval_count = obj.get("eval_count", 0)
                     eval_duration_ns = obj.get("eval_duration", 0)
+                    prompt_eval_duration_ns = obj.get("prompt_eval_duration", 0)
         if not output_json:
             print()
     except Exception as e:
         return None, f"OLLAMA_API_ERROR: {e}"
 
     t_end = time.perf_counter()
-    ttft = (t_first_chunk - t_start) if t_first_chunk else 0.0
-    decode_time = (eval_duration_ns / 1e9) if eval_duration_ns > 0 else ((t_end - t_first_chunk) if t_first_chunk else (t_end - t_start))
+    if 'prompt_eval_duration_ns' in locals() and prompt_eval_duration_ns > 0:
+        ttft = prompt_eval_duration_ns / 1e9
+    else:
+        ttft = (t_first_chunk - t_start) if t_first_chunk else 0.0
+
+    if eval_duration_ns > 0:
+        decode_time = eval_duration_ns / 1e9
+    elif t_first_chunk:
+        decode_time = t_end - t_first_chunk
+    else:
+        decode_time = t_end - t_start
+
     toks = eval_count if eval_count > 0 else max(1, len(full_text))
-    rate = toks / decode_time if decode_time > 0.01 else 0.0
+    rate = toks / decode_time if decode_time > 0.001 else 0.0
     ms_tok = (decode_time * 1000.0) / toks if toks > 0 and decode_time > 0 else 0.0
 
     metrics = {
@@ -674,6 +688,8 @@ Ejemplos de uso:
     parser.add_argument("--sync-memory", action="store_true", help="Forzar sincronización de profile.md y facts.md hacia el KV cache de la GPU")
 
     parser.add_argument("-f", "--file", help="Ruta a un archivo cuyo contenido se usará como prompt o contexto")
+    parser.add_argument("--raw", action="store_true",
+                        help="Completar texto puro directamente sin inyectar plantillas de chat o memoria del sistema (ideal para benchmarks)")
 
     args = parser.parse_args()
 
@@ -751,18 +767,19 @@ Ejemplos de uso:
     if target_dev == "gpu":
         # Check if 1.5B daemon is running
         if model_key in ("1.5", "1.5b", "default"):
-            resp_text, metrics = query_gpu_daemon(prompt_text, args.tokens, verbose=args.verbose, output_json=args.json)
-            # If daemon not running, fallback to standalone direct GPU generator
+            if not args.raw:
+                resp_text, metrics = query_gpu_daemon(prompt_text, args.tokens, verbose=args.verbose, output_json=args.json)
+            # If daemon not running or raw requested, fallback to standalone direct GPU generator
             if resp_text is None:
-                if args.verbose:
+                if args.verbose and not args.raw:
                     print(f"[*] qwen_server inactivo ({metrics}). Usando generador GPU directo (generate_stream)...", file=sys.stderr)
-                resp_text, metrics = query_gpu_standalone(prompt_text, "1.5b", args.tokens, verbose=args.verbose, output_json=args.json)
+                resp_text, metrics = query_gpu_standalone(prompt_text, "1.5b", args.tokens, verbose=args.verbose, output_json=args.json, raw=args.raw)
         else:
             # 0.5B standalone GPU
-            resp_text, metrics = query_gpu_standalone(prompt_text, model_key, args.tokens, verbose=args.verbose, output_json=args.json)
+            resp_text, metrics = query_gpu_standalone(prompt_text, model_key, args.tokens, verbose=args.verbose, output_json=args.json, raw=args.raw)
 
     elif target_dev == "avx":
-        resp_text, metrics = query_avx_ollama(prompt_text, model_key, args.tokens, verbose=args.verbose, output_json=args.json)
+        resp_text, metrics = query_avx_ollama(prompt_text, model_key, args.tokens, verbose=args.verbose, output_json=args.json, raw=args.raw)
         # If Ollama fails, fallback to CPU standard
         if resp_text is None:
             if args.verbose:
