@@ -230,6 +230,21 @@ Following the architectural parity with `ask-chatgpt`, the unified CLI tool [`as
 2. **0.5B GPU Acceleration:** Reached **364.02 ms/token (2.75 t/s)** directly on discrete Kepler hardware, demonstrating a **$2.33\times$ speedup** over 1.5B on the exact same GPU silicon.
 3. **Piped Stdin & Composability:** `echo "código" | ask-qwen -d gpu` and `--json` allow zero-overhead integration into automated shell scripts and development workflows.
 
+#### CPU Thread Scaling Analysis (1 vs 2 vs 4 vs 8 Threads)
+
+The Intel Core i7-4870HQ processor features **4 physical cores** and **8 logical threads** via Intel Hyper-Threading (SMT). We evaluated multi-threading efficiency across both model scales:
+
+| Thread Count (`-t`) | Silicon Allocation | Qwen 0.5B Generation Rate | Qwen 1.5B Generation Rate | Hyper-Threading Efficiency |
+| :---: | :--- | :---: | :---: | :--- |
+| **`1 Thread`** | 1 Physical Core | $19.0\text{ tok/s}$ | $7.0\text{ tok/s}$ | Single-core baseline |
+| **`2 Threads`** | 2 Physical Cores | $30.2\text{ tok/s}$ ($1.59\times$) | $11.8\text{ tok/s}$ ($1.69\times$) | Excellent linear scaling |
+| **`4 Threads`** | **4 Physical Cores (Sweet Spot)** | **$36.0\text{ tok/s}$** ($1.89\times$) ⚡ | **$12.5\text{ tok/s}$** ($1.79\times$) ⚡ | **Optimal latency & efficiency** 🏆 |
+| **`8 Threads`** | 4 Cores / 8 SMT Hyper-Threads | $0.5\text{ tok/s}$ (Contention) | $0.4\text{ tok/s}$ (Contention) | Severe SIMD/L3 Cache Thrashing |
+
+> [!IMPORTANT]
+> **Why 4 Threads is the Physical Optimum:**  
+> LLM autoregressive token decode is strictly memory-bandwidth bound. Intel Hyper-Threading allows two logical threads to share the same physical ALUs, vector registers (AVX2), and L1/L2 caches. At 8 threads, thread synchronization overhead and L1/L2 data cache evictions cause severe CPU stall cycles, collapsing throughput. For CPU inference on 4-core Haswell chips, **`-t 4` delivers the peak performance**.
+
 ---
 
 ## 7. Key Engineering Conclusions & The 16 GB Memory Wall

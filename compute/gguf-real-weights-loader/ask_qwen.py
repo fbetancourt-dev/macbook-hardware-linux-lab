@@ -582,7 +582,7 @@ def query_avx_ollama(prompt: str, model_size: str, max_tokens: int, verbose: boo
     }
     return "".join(full_text), metrics
 
-def query_cpu_standard(prompt: str, model_size: str, max_tokens: int, verbose: bool = False, output_json: bool = False):
+def query_cpu_standard(prompt: str, model_size: str, max_tokens: int, threads: int = 8, verbose: bool = False, output_json: bool = False):
     model_path, tag = resolve_model_path(model_size)
     if not os.path.exists(LLAMA_CLI_BIN):
         return None, f"BINARY_NOT_FOUND: {LLAMA_CLI_BIN}"
@@ -594,7 +594,7 @@ def query_cpu_standard(prompt: str, model_size: str, max_tokens: int, verbose: b
         "-m", model_path,
         "-p", prompt,
         "-n", str(max_tokens),
-        "-t", "4",
+        "-t", str(threads),
         "--no-warmup",
         "--log-disable",
         "--single-turn",
@@ -636,7 +636,7 @@ def query_cpu_standard(prompt: str, model_size: str, max_tokens: int, verbose: b
 
     metrics = {
         "device": "CPU (Intel Haswell i7-4870HQ)",
-        "backend": f"Standard llama-cli (4 Threads)",
+        "backend": f"Standard llama-cli ({threads} Threads)",
         "model": f"qwen2.5:{tag}",
         "ttft_s": total_s - decode_s if total_s > decode_s else 0.2,
         "decode_s": decode_s,
@@ -645,7 +645,7 @@ def query_cpu_standard(prompt: str, model_size: str, max_tokens: int, verbose: b
         "tokens_per_sec": rate,
         "ms_per_token": ms_tok,
         "vram_mb": 0,
-        "cpu_usage": "4 Threads Standard"
+        "cpu_usage": f"{threads} Threads Standard"
     }
     return result_text, metrics
 
@@ -662,7 +662,7 @@ Ejemplos de uso:
   ask-qwen "Calcula un filtro pasa bajas RC a 10 kHz"
   ask-qwen -d gpu -m 1.5b "Escribe un driver I2C para ESP32"
   ask-qwen -d avx -m 1.5b "Explica el protocolo SPI en C"
-  ask-qwen -d avx -m 7b "Refactoriza este algoritmo para minimizar complejidad"
+  ask-qwen -d cpu -t 8 -m 1.5b "Compara velocidad con 8 hilos"
   ask-qwen -d cpu -m 0.5b "Hola Qwen"
   cat main.c | ask-qwen "Encuentra posibles memory leaks"
   ask-qwen --status
@@ -675,6 +675,8 @@ Ejemplos de uso:
                         help="Silicon target / Motor de aceleración: 'gpu' (NVIDIA GT 750M Kepler), 'avx' (CPU 8T AVX2 Fast), 'cpu' (llama-cli estándar)")
     parser.add_argument("-m", "--model", default="1.5b",
                         help="Variante del modelo Qwen (ej: '1.5b', '0.5b', '3b', '7b'). Por defecto: 1.5b")
+    parser.add_argument("-t", "--threads", type=int, default=8,
+                        help="Número de hilos de CPU a utilizar para inferencia CPU (default: 8)")
     parser.add_argument("-n", "--tokens", type=int, default=64,
                         help="Máximo de tokens a generar (default: 64)")
     parser.add_argument("--json", action="store_true",
@@ -784,10 +786,10 @@ Ejemplos de uso:
         if resp_text is None:
             if args.verbose:
                 print(f"[*] Fallback: Ollama AVX no disponible ({metrics}). Ejecutando en CPU standard...", file=sys.stderr)
-            resp_text, metrics = query_cpu_standard(prompt_text, model_key, args.tokens, verbose=args.verbose, output_json=args.json)
+            resp_text, metrics = query_cpu_standard(prompt_text, model_key, args.tokens, threads=args.threads, verbose=args.verbose, output_json=args.json)
 
     elif target_dev == "cpu":
-        resp_text, metrics = query_cpu_standard(prompt_text, model_key, args.tokens, verbose=args.verbose, output_json=args.json)
+        resp_text, metrics = query_cpu_standard(prompt_text, model_key, args.tokens, threads=args.threads, verbose=args.verbose, output_json=args.json)
 
     if resp_text is None:
         print(f"❌ Error ejecutando inferencia en backend {target_dev}: {metrics}", file=sys.stderr)
